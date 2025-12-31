@@ -1,0 +1,24 @@
+# Lake build artifacts
+lake-packages/
+
+# Build outputs
+build/
+
+# Editor and IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Lean build artifacts
+*.olean
+*.ilean
+*.trace
+*.c
+*.o
+
+# Lake cache
+.lake
+lake-manifest.json
