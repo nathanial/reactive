@@ -18,7 +18,20 @@ structure Spider where
 
 instance : Timeline Spider where
 
-/-- Environment for the Spider monad -/
+/-- Error handler for subscriber callback exceptions.
+    Receives the error that occurred during event propagation.
+    Return `true` to continue processing remaining subscribers,
+    `false` to stop propagation (re-raises the error). -/
+abbrev PropagationErrorHandler := IO.Error → IO Bool
+
+/-- Default error handler: logs error to stderr and continues propagation -/
+def defaultErrorHandler : PropagationErrorHandler := fun err => do
+  IO.eprintln s!"[Reactive] Error in subscriber callback: {err}"
+  pure true
+
+/-- Strict error handler: re-raises the first error, stopping propagation -/
+def strictErrorHandler : PropagationErrorHandler := fun _ => pure false
+
 structure SpiderEnv where
   /-- Timeline context for type-safe event creation -/
   timelineCtx : TimelineCtx Spider
@@ -32,22 +45,26 @@ structure SpiderEnv where
   propagationQueue : IO.Ref PropagationQueue
   /-- Current subscription scope for automatic cleanup -/
   currentScope : SubscriptionScope
+  /-- Error handler for subscriber callback exceptions -/
+  errorHandler : IO.Ref PropagationErrorHandler
 
 namespace SpiderEnv
 
 /-- Create a new Spider environment -/
-def new : IO SpiderEnv := do
+def new (errorHandler : PropagationErrorHandler := defaultErrorHandler) : IO SpiderEnv := do
   let timelineCtx ← TimelineCtx.new
   let postBuildActions ← IO.mkRef #[]
   let (postBuildEvent, postBuildTrigger) ← Event.newTriggerWithId ⟨0⟩
   let propagationQueue ← IO.mkRef {}
   let currentScope ← SubscriptionScope.new
+  let errorHandlerRef ← IO.mkRef errorHandler
   -- Set global propagation context for frame-based firing
   setPropagationContext propagationQueue
-  pure { timelineCtx, postBuildActions, postBuildEvent, postBuildTrigger, propagationQueue, currentScope }
+  pure { timelineCtx, postBuildActions, postBuildEvent, postBuildTrigger, propagationQueue, currentScope, errorHandler := errorHandlerRef }
 
 /-- Process all pending fires in height order until queue is empty.
-    When current frame is empty, processes nextFramePending in a new sub-frame. -/
+    When current frame is empty, processes nextFramePending in a new sub-frame.
+    Errors in subscriber callbacks are handled by the configured error handler. -/
 partial def drainQueue (env : SpiderEnv) : IO Unit := do
   let q ← env.propagationQueue.get
   match q.popMin? with
@@ -65,7 +82,14 @@ partial def drainQueue (env : SpiderEnv) : IO Unit := do
       env.drainQueue
   | some (pending, q') =>
     env.propagationQueue.set q'
-    pending.fire  -- Execute the fire action
+    -- Execute the fire action with error handling
+    try
+      pending.fire
+    catch e =>
+      let handler ← env.errorHandler.get
+      let shouldContinue ← handler e
+      if !shouldContinue then
+        throw e
     env.drainQueue  -- Continue draining
 
 /-- Execute an action within a propagation frame.
@@ -97,9 +121,10 @@ structure SpiderM (a : Type) where
 namespace SpiderM
 
 /-- Run a SpiderM action with a fresh environment.
-    Disposes the root scope when done, cleaning up all subscriptions. -/
-def runFresh (m : SpiderM a) : IO a := do
-  let env ← SpiderEnv.new
+    Disposes the root scope when done, cleaning up all subscriptions.
+    @param errorHandler Optional error handler for subscriber exceptions (default: log and continue) -/
+def runFresh (m : SpiderM a) (errorHandler : PropagationErrorHandler := defaultErrorHandler) : IO a := do
+  let env ← SpiderEnv.new errorHandler
   let result ← m.run env
   -- Fire post-build event
   env.postBuildTrigger ()
@@ -118,6 +143,17 @@ def getTimelineCtx : SpiderM (TimelineCtx Spider) :=
 /-- Register a post-build action -/
 def registerPostBuild (action : IO Unit) : SpiderM Unit := ⟨fun env => do
   env.postBuildActions.modify (·.push action)⟩
+
+/-- Get the current error handler -/
+def getErrorHandler : SpiderM PropagationErrorHandler :=
+  ⟨fun env => env.errorHandler.get⟩
+
+/-- Set the error handler for subscriber callback exceptions.
+    - `defaultErrorHandler`: logs errors and continues (default)
+    - `strictErrorHandler`: re-raises first error, stopping propagation
+    - Custom handler: receives `IO.Error`, returns `Bool` (true = continue) -/
+def setErrorHandler (handler : PropagationErrorHandler) : SpiderM Unit :=
+  ⟨fun env => env.errorHandler.set handler⟩
 
 instance : Monad SpiderM where
   pure a := ⟨fun _ => pure a⟩
@@ -937,9 +973,95 @@ def traverseDynList (f : a → SpiderM b) (dynList : Dynamic Spider (List a))
   pure resultDyn
 ⟩
 
+/-! ## Integration Helpers
+
+Common patterns for integrating reactive networks with external systems. -/
+
+/-- Create a poll-based event source.
+    The provided IO action is polled repeatedly. When it returns `some value`,
+    the event fires with that value. When it returns `none`, no event fires.
+
+    Use with `runSpiderLoop` for continuous polling, or call the returned
+    poll action manually.
+
+    Example:
+    ```
+    -- Create event that fires when stdin has input
+    let (inputEvent, pollInput) ← fromIO do
+      if ← IO.getStdin.anyAvailable then
+        some <$> IO.getStdin.getLine
+      else
+        pure none
+    ```
+-/
+def fromIO (poll : IO (Option a)) : SpiderM (Event Spider a × IO Unit) := do
+  let (event, fire) ← newTriggerEvent (t := Spider) (a := a)
+  let pollAction : IO Unit := do
+    match ← poll with
+    | some value => fire value
+    | none => pure ()
+  pure (event, pollAction)
+
+/-- Export an event as a callback.
+    Subscribes to the event and calls the provided callback whenever it fires.
+    The subscription is registered with the current scope for automatic cleanup.
+
+    Example:
+    ```
+    -- Forward clicks to an external system
+    toCallback clickEvent fun pos =>
+      ExternalUI.handleClick pos
+    ```
+-/
+def toCallback (event : Event Spider a) (callback : a → IO Unit) : SpiderM Unit := do
+  let _ ← Event.subscribeM event callback
+  pure ()
+
+/-- Create an event from an IO.Ref.
+    Returns an event that fires whenever the ref is modified, plus a function
+    to trigger updates. The event fires with the new value after modification.
+
+    Example:
+    ```
+    let (stateEvent, updateState) ← fromRef initialState
+    -- Later:
+    updateState (· + 1)  -- Fires stateEvent with new value
+    ```
+-/
+def fromRef (initial : a) : SpiderM (Event Spider a × (a → IO Unit) × IO.Ref a) := do
+  let ref ← SpiderM.liftIO <| IO.mkRef initial
+  let (event, fire) ← newTriggerEvent (t := Spider) (a := a)
+  let update := fun newValue => do
+    ref.set newValue
+    fire newValue
+  pure (event, update, ref)
+
+/-- Create an event and behavior pair from a mutable ref.
+    The behavior always samples the current ref value.
+    The event fires when update is called.
+
+    This is similar to `holdDyn` but gives you direct control over when
+    updates happen via the returned update function.
+-/
+def fromRefWithBehavior (initial : a) : SpiderM (Event Spider a × Behavior Spider a × (a → IO Unit)) := do
+  let ref ← SpiderM.liftIO <| IO.mkRef initial
+  let (event, fire) ← newTriggerEvent (t := Spider) (a := a)
+  let behavior := Behavior.fromSample ref.get
+  let update := fun newValue => do
+    ref.set newValue
+    fire newValue
+  pure (event, behavior, update)
+
 /-- Run a Spider network and return the result -/
 def runSpider (network : SpiderM a) : IO a :=
   SpiderM.runFresh network
+
+/-- Run a Spider network with a custom error handler.
+    - `defaultErrorHandler`: logs errors and continues (default for runSpider)
+    - `strictErrorHandler`: re-raises first error, stopping propagation -/
+def runSpiderWithErrorHandler (network : SpiderM a)
+    (errorHandler : PropagationErrorHandler) : IO a :=
+  SpiderM.runFresh network errorHandler
 
 /-- Run a Spider network with an event loop.
 

@@ -351,22 +351,26 @@ Available functions:
 
 ---
 
-### [Priority: Low] Error Handling in Event Propagation
+### [DONE] Error Handling in Event Propagation
 
-**Description:** Add configurable error handling for subscriber callbacks that throw exceptions.
+Added configurable error handling for subscriber callbacks that throw exceptions:
 
-**Rationale:** Currently, if a subscriber callback throws, it can break the entire propagation chain. Options:
-1. Catch and log errors, continuing with other subscribers
-2. Propagate first error after notifying all subscribers
-3. Allow configurable error handlers per event
+**Types:**
+- `PropagationErrorHandler`: `IO.Error → IO Bool` (return true to continue)
+- `defaultErrorHandler`: Logs to stderr and continues propagation
+- `strictErrorHandler`: Re-raises first error, stopping propagation
 
-**Affected Files:**
-- `/Users/Shared/Projects/lean-workspace/data/reactive/Reactive/Core/Event.lean` (EventNode.fire)
-- `/Users/Shared/Projects/lean-workspace/data/reactive/Reactive/Host/Spider.lean` (error handling config)
+**SpiderM API:**
+- `SpiderM.getErrorHandler` / `SpiderM.setErrorHandler`
+- `runSpiderWithErrorHandler network handler`
 
-**Estimated Effort:** Small
+**Implementation:**
+- `SpiderEnv` now contains an error handler ref
+- `drainQueue` wraps `pending.fire` in try-catch
+- Default behavior: log errors but continue propagating to other subscribers
 
-**Dependencies:** None
+**Files Modified:**
+- `Reactive/Host/Spider.lean`
 
 ---
 
@@ -448,15 +452,9 @@ Implemented. See "Type-Safe Timeline Separation" in Recently Completed section.
 
 ---
 
-### [Priority: Medium] Consolidate Event.map Patterns
+### [DONE] Consolidate Event.map Patterns
 
-**Issue:** `Event.map`, `Event.filter`, and `Event.mapMaybe` have very similar structure. The pattern of creating a derived node and subscribing to the source is repeated.
-
-**Location:** `/Users/Shared/Projects/lean-workspace/data/reactive/Reactive/Core/Event.lean` (lines 99-120)
-
-**Action Required:** Extract a helper function for the common "derive from source event" pattern.
-
-**Estimated Effort:** Small
+Already implemented. The `deriveWith` and `deriveWithId` helper functions exist in `Event.lean` (lines 204-219) and are used by `map`, `filter`, and `mapMaybe`.
 
 ---
 
@@ -547,18 +545,19 @@ Dynamic.map' dynA f >>= (Dynamic.zipWith' · g dynB)
 
 ---
 
-### [Priority: Low] Integration Helpers for Common Patterns
+### [DONE] Integration Helpers for Common Patterns
 
-**Description:** Add ready-made helpers for common integration scenarios:
-1. `fromIO : IO (Option a) -> SpiderM (Event Spider a)` - poll-based event source
-2. `toCallback : Event t a -> (a -> IO Unit) -> SpiderM Unit` - export event as callback
-3. `fromChannel : Conduit.Channel a -> SpiderM (Event Spider a)` - conduit integration
+Added helpers for integrating reactive networks with external systems:
 
-**Rationale:** Reduce boilerplate when integrating reactive networks with external systems.
+**Functions:**
+- `fromIO : IO (Option a) → SpiderM (Event Spider a × IO Unit)` - Poll-based event source
+- `toCallback : Event Spider a → (a → IO Unit) → SpiderM Unit` - Export event as callback
+- `fromRef : a → SpiderM (Event Spider a × (a → IO Unit) × IO.Ref a)` - Event from mutable ref
+- `fromRefWithBehavior : a → SpiderM (Event Spider a × Behavior Spider a × (a → IO Unit))` - Event + Behavior from ref
 
-**Affected Files:**
-- New file `/Users/Shared/Projects/lean-workspace/data/reactive/Reactive/Integration.lean`
+**Note:** `fromChannel` not implemented (Conduit not a dependency)
 
-**Estimated Effort:** Small
+**Files Modified:**
+- `Reactive/Host/Spider.lean`
 
 ---
