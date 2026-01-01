@@ -256,6 +256,111 @@ def traverseWithAdjustM (f : a → SpiderM b) (inputs : List a)
   pure (results, neverEvent)
 ⟩
 
+/-! ## Recursive Binding Combinators
+
+These enable circular dependencies between events and dynamics.
+Since Lean 4 is strict (unlike Haskell), we use lazy IO.Ref placeholders
+that get filled after network construction completes. -/
+
+/-- Create a self-referential dynamic.
+
+    The function `f` receives a Behavior that will sample from the Dynamic
+    being created. This enables circular dependencies where the dynamic's
+    value depends on events that filter based on the dynamic's current value.
+
+    Example - counter that stops at maxValue:
+    ```
+    fixDynM fun counterBehavior => do
+      let (clicks, fire) ← newTriggerEvent
+      let gated ← Event.filterM (fun _ => do
+        let c ← sample counterBehavior
+        pure (c < maxValue)) clicks
+      foldDyn (fun _ n => n + 1) 0 gated
+    ```
+
+    The behavior samples from a lazy ref that gets filled after `f` completes.
+    This works because behaviors are only sampled inside event handlers,
+    which run after network construction finishes.
+
+    IMPORTANT: The behavior should only be sampled inside event handlers,
+    not during network construction. Sampling during construction returns
+    the default value. -/
+def fixDynM [Inhabited a] (f : Behavior Spider a → SpiderM (Dynamic Spider a))
+    : SpiderM (Dynamic Spider a) := ⟨fun env => do
+  -- Create ref to hold the real dynamic (initially none)
+  let dynRef : IO.Ref (Option (Dynamic Spider a)) ← IO.mkRef none
+
+  -- Create a "lazy" behavior that samples from the ref
+  let lazyBehavior := Behavior.fromSample do
+    match ← dynRef.get with
+    | some d => d.sample
+    | none => pure default  -- Before wiring, return default
+
+  -- Run f with the lazy behavior
+  let realDyn ← (f lazyBehavior).run env
+
+  -- Store the real dynamic in the ref
+  dynRef.set (some realDyn)
+
+  pure realDyn⟩
+
+/-- Create two mutually recursive dynamics.
+
+    Example - toggle and counter that depend on each other:
+    ```
+    fixDyn2M fun toggleB countB => do
+      let (event, fire) ← newTriggerEvent
+      -- Toggle flips when count is even
+      let toggle ← foldDyn (fun _ b => !b) false =<<
+        Event.filterM (fun _ => (· % 2 == 0) <$> sample countB) event
+      -- Count increments when toggle is true
+      let count ← foldDyn (fun _ n => n + 1) 0 =<<
+        Event.filterM (fun _ => sample toggleB) event
+      pure (toggle, count)
+    ``` -/
+def fixDyn2M [Inhabited a] [Inhabited b]
+    (f : Behavior Spider a → Behavior Spider b → SpiderM (Dynamic Spider a × Dynamic Spider b))
+    : SpiderM (Dynamic Spider a × Dynamic Spider b) := ⟨fun env => do
+  let refA : IO.Ref (Option (Dynamic Spider a)) ← IO.mkRef none
+  let refB : IO.Ref (Option (Dynamic Spider b)) ← IO.mkRef none
+
+  let lazyA := Behavior.fromSample do
+    match ← refA.get with
+    | some d => d.sample
+    | none => pure default
+
+  let lazyB := Behavior.fromSample do
+    match ← refB.get with
+    | some d => d.sample
+    | none => pure default
+
+  let (dynA, dynB) ← (f lazyA lazyB).run env
+
+  refA.set (some dynA)
+  refB.set (some dynB)
+
+  pure (dynA, dynB)⟩
+
+/-- Create a self-referential event.
+
+    Similar to fixDynM but for events. The function receives an IO action
+    that will eventually provide access to the event being created.
+
+    The IO action should only be called inside event handlers, not during
+    network construction. -/
+def fixEventM (f : IO (Event Spider a) → SpiderM (Event Spider a))
+    : SpiderM (Event Spider a) := ⟨fun env => do
+  let eventRef : IO.Ref (Option (Event Spider a)) ← IO.mkRef none
+
+  let getEvent : IO (Event Spider a) := do
+    match ← eventRef.get with
+    | some e => pure e
+    | none => panic! "fixEventM: event accessed before wiring complete"
+
+  let realEvent ← (f getEvent).run env
+  eventRef.set (some realEvent)
+  pure realEvent⟩
+
 end SpiderM
 
 /-! ## Dynamic SpiderM Combinators

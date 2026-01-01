@@ -8,6 +8,7 @@ import ReactiveTests.PropagationTests
 import ReactiveTests.AdjustableTests
 import ReactiveTests.TemporalTests
 import ReactiveTests.ScopeTests
+import ReactiveTests.RecursiveTests
 
 open Crucible
 

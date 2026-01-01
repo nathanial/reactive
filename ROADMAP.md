@@ -192,6 +192,35 @@ Added comprehensive docstrings with examples to core Event functions:
 - `Event.subscribeScoped`
 - `Event.map`, `filter`, `mapMaybe`, `merge`
 
+### [DONE] RecursiveDo / mfix Support
+
+Implemented fixed-point combinators enabling circular event/dynamic dependencies:
+
+**Core Combinators:**
+- `SpiderM.fixDynM` - Create self-referential dynamics via lazy behavior accessor
+- `SpiderM.fixDyn2M` - Create mutually recursive pairs of dynamics
+- `SpiderM.fixEventM` - Create self-referential events via lazy IO accessor
+
+**Design Approach:**
+- Pass `Behavior` (lazy accessor) instead of Dynamic to the recursive function
+- Behaviors are only sampled in event handlers, which run after network construction
+- Uses `IO.Ref (Option (Dynamic t a))` as placeholder filled after `f` completes
+- Requires `Inhabited a` for default value before wiring
+
+**Example - Counter that disables at maxValue:**
+```lean
+fixDynM fun counterBehavior => do
+  let (clicks, fire) ← newTriggerEvent
+  let gateBehavior := counterBehavior.map (fun c => decide (c < maxValue))
+  let gatedClicks ← Event.gateM gateBehavior clicks
+  foldDyn (fun _ n => n + 1) 0 gatedClicks
+```
+
+**Files Modified:**
+- `Reactive/Host/Spider.lean` (fixDynM, fixDyn2M, fixEventM in SpiderM namespace)
+- `ReactiveTests/RecursiveTests.lean` (new test file with 4 tests)
+- `ReactiveTests/Main.lean` (import RecursiveTests)
+
 ### [DONE] Type-Safe Timeline Separation
 
 Implemented compile-time enforcement preventing mixing events from different timelines:
@@ -512,20 +541,6 @@ let result ← event.mapM f >>= filterM p
 - `/Users/Shared/Projects/lean-workspace/data/reactive/Reactive/Combinators/Event.lean`
 
 **Estimated Effort:** Medium
-
----
-
-### [Priority: Medium] RecursiveDo / mfix Support
-
-**Description:** Add support for defining mutually recursive events/dynamics using a fixed-point combinator.
-
-**Rationale:** Many reactive UIs require circular dependencies (e.g., a button that disables based on a counter that the button updates). Currently this requires manual delay or workarounds.
-
-**Affected Files:**
-- `/Users/Shared/Projects/lean-workspace/data/reactive/Reactive/Host/Spider.lean`
-- New module for recursive binding support
-
-**Estimated Effort:** Large
 
 ---
 
