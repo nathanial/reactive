@@ -83,20 +83,27 @@ def fanEither [Timeline t] (e : Event t (Sum a b)) (nodeIdL : NodeId) (nodeIdR :
 /-- Delay an event by one propagation frame.
     Useful for breaking dependency cycles.
 
-    WARNING: This combinator is currently incomplete - it passes through
-    immediately without actual delay. A proper implementation requires
-    frame scheduling infrastructure.
+    When the source event fires in frame N, the derived event fires
+    at the start of frame N+1 (after all frame-N events have been processed).
 
-    TODO: Implement actual frame-based delay using:
-    1. A frame counter in SpiderEnv
-    2. A queue of pending fires for the next frame
-    3. A mechanism to advance frames (either time-based or explicit) -/
-def delay [Timeline t] (e : Event t a) (nodeId : NodeId) : IO (Event t a) := do
+    This uses the nextFramePending queue in PropagationQueue. -/
+def delayFrame [Timeline t] (e : Event t a) (nodeId : NodeId) : IO (Event t a) := do
   let derived ← Event.newNode nodeId (e.height.inc)
   let _ ← e.subscribe fun a => do
-    -- WARNING: No-op pass-through. See docstring for TODO.
-    derived.fire a
+    match ← getPropagationContext with
+    | some queueRef =>
+      let q ← queueRef.get
+      let action := derived.fire a
+      let pending : PendingFire := ⟨derived.height, nodeId, action⟩
+      -- Add to nextFramePending instead of current frame
+      queueRef.set { q with nextFramePending := q.nextFramePending.push pending }
+    | none =>
+      -- No frame context, fire immediately (fallback)
+      derived.fire a
   pure derived
+
+/-- Deprecated alias for delayFrame. Use delayFrame for frame-based delay. -/
+abbrev delay := @delayFrame
 
 /-- Take only the first n occurrences -/
 def takeN [Timeline t] (n : Nat) (e : Event t a) (nodeId : NodeId) : IO (Event t a) := do

@@ -59,6 +59,37 @@ Located in `Reactive/Host/Spider.lean`.
 
 Added `Event.scan` as an alias for `Event.accumulate` (familiar name from other FRP libraries). Like `foldDyn` but returns an Event instead of a Dynamic.
 
+### [DONE] Temporal Combinators (delay, debounce, throttle)
+
+Implemented comprehensive temporal event combinators:
+
+**Frame-based delay (`delayFrame`):**
+- Delays event to the next propagation frame
+- Uses `nextFramePending` queue in `PropagationQueue`
+- Useful for breaking dependency cycles
+
+**Time-based delay (`delayDurationM`):**
+- Delays event by a specified `Chronos.Duration`
+- Uses async tasks with `IO.sleep`
+- Fires delayed events in new propagation frames
+
+**Debounce (`debounceM`):**
+- Only fires after source has been quiet for specified duration
+- Uses generation-based cancellation pattern
+- Useful for text input stabilization
+
+**Throttle (`throttleM`):**
+- Rate limits to at most one fire per interval
+- Supports both leading and trailing fire options
+- Configurable via `leading` and `trailing` parameters
+
+**Files Modified:**
+- `Reactive/Core/Types.lean` (added `nextFramePending` to PropagationQueue)
+- `Reactive/Combinators/Event.lean` (implemented `delayFrame`)
+- `Reactive/Host/Spider.lean` (added temporal combinators, modified drainQueue)
+- `lakefile.lean` (added chronos dependency)
+- `ReactiveTests/TemporalTests.lean` (new test file with 11 tests)
+
 ### [DONE] Frame-Based Glitch-Free Propagation
 
 Implemented true frame-based event handling with height-ordered processing:
@@ -121,41 +152,15 @@ Implemented the `Adjustable` typeclass enabling higher-order FRP patterns:
 
 ---
 
-### [Priority: Medium] Proper delay Combinator Implementation
+### [DONE] Proper delay Combinator Implementation
 
-**Description:** Implement actual frame-delayed event firing in `Event.delay`.
-
-**Rationale:** The current `delay` implementation (line 85-91 of Event.lean) is a no-op that just passes through immediately. A proper delay should schedule the event for the next propagation frame, which is essential for:
-1. Breaking dependency cycles
-2. Implementing debounce/throttle patterns
-3. Animation scheduling
-
-**Affected Files:**
-- `/Users/Shared/Projects/lean-workspace/data/reactive/Reactive/Combinators/Event.lean` (delay function)
-- `/Users/Shared/Projects/lean-workspace/data/reactive/Reactive/Host/Spider.lean` (frame scheduling)
-
-**Estimated Effort:** Medium
-
-**Dependencies:** None (frame-based propagation is now complete)
+Implemented. See "Temporal Combinators" in Recently Completed section.
 
 ---
 
-### [Priority: Medium] Debounce and Throttle Combinators
+### [DONE] Debounce and Throttle Combinators
 
-**Description:** Add time-based event combinators: `debounce`, `throttle`, `throttleWithTrailing`.
-
-**Rationale:** These are essential for real-world applications handling user input, network events, or other rapid-fire event sources. Common use cases:
-- Search-as-you-type with debouncing
-- Rate-limiting API calls
-- Smooth scrolling with throttled updates
-
-**Affected Files:**
-- `/Users/Shared/Projects/lean-workspace/data/reactive/Reactive/Combinators/Event.lean` (new combinators)
-- May require chronos dependency for time handling
-
-**Estimated Effort:** Medium
-
-**Dependencies:** Proper delay implementation, potential chronos integration
+Implemented. See "Temporal Combinators" in Recently Completed section.
 
 ---
 

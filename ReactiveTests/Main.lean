@@ -6,6 +6,7 @@ import ReactiveTests.SwitchTests
 import ReactiveTests.PropertyTests
 import ReactiveTests.PropagationTests
 import ReactiveTests.AdjustableTests
+import ReactiveTests.TemporalTests
 
 open Crucible
 

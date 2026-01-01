@@ -7,6 +7,7 @@
 import Reactive.Core
 import Reactive.Class
 import Reactive.Combinators
+import Chronos
 
 namespace Reactive.Host
 
@@ -42,11 +43,23 @@ def new : IO SpiderEnv := do
   setPropagationContext propagationQueue
   pure { nextNodeId, postBuildActions, postBuildEvent, postBuildTrigger, propagationQueue }
 
-/-- Process all pending fires in height order until queue is empty -/
+/-- Process all pending fires in height order until queue is empty.
+    When current frame is empty, processes nextFramePending in a new sub-frame. -/
 partial def drainQueue (env : SpiderEnv) : IO Unit := do
   let q ← env.propagationQueue.get
   match q.popMin? with
-  | none => return ()  -- Queue empty, done
+  | none =>
+    -- Current frame empty, check for next-frame events (from delayFrame)
+    if q.nextFramePending.isEmpty then
+      return ()  -- All done
+    else
+      -- Start new sub-frame with next-frame events
+      env.propagationQueue.set {
+        pending := q.nextFramePending,
+        nextFramePending := #[],
+        inFrame := true
+      }
+      env.drainQueue
   | some (pending, q') =>
     env.propagationQueue.set q'
     pending.fire  -- Execute the fire action
@@ -314,11 +327,11 @@ def fanEitherM (e : Event Spider (Sum a b)) : SpiderM (Event Spider a × Event S
   let nodeIdR ← SpiderM.freshNodeId
   SpiderM.liftIO <| Event.fanEither e nodeIdL nodeIdR
 
-/-- Delay an Event by one frame, auto-allocating NodeId.
-    Note: Currently a no-op pass-through (see ROADMAP). -/
-def delayM (e : Event Spider a) : SpiderM (Event Spider a) := do
+/-- Delay an Event by one propagation frame, auto-allocating NodeId.
+    Useful for breaking dependency cycles. -/
+def delayFrameM (e : Event Spider a) : SpiderM (Event Spider a) := do
   let nodeId ← SpiderM.freshNodeId
-  SpiderM.liftIO <| Event.delay e nodeId
+  SpiderM.liftIO <| Event.delayFrame e nodeId
 
 /-- Take at most n occurrences from an Event, auto-allocating NodeId. -/
 def takeNM (n : Nat) (e : Event Spider a) : SpiderM (Event Spider a) := do
@@ -339,6 +352,107 @@ def accumulateM (f : a → b → b) (initial : b) (e : Event Spider a)
 
 /-- Alias for accumulateM (familiar name from other FRP libraries). -/
 abbrev scanM := @accumulateM
+
+end Event
+
+/-! ## Temporal Combinators
+
+Time-based event combinators for delay, debounce, and throttle.
+These use async tasks with IO.sleep for timing. -/
+
+namespace Event
+
+/-- Delay event firings by a specified duration.
+    Each firing is independently delayed - if the source fires
+    at times t1, t2, the derived fires at t1+d, t2+d.
+
+    Uses an async task with IO.sleep. The delayed fire happens
+    in a new propagation frame. -/
+def delayDurationM (d : Chronos.Duration) (e : Event Spider a) : SpiderM (Event Spider a) :=
+  ⟨fun env => do
+    let nodeId ← env.nextNodeId.modifyGet fun n => (NodeId.mk n, n + 1)
+    let derived ← Event.newNode nodeId (e.height.inc)
+    let _ ← e.subscribe fun a => do
+      let _ ← IO.asTask (prio := .dedicated) do
+        let ms := d.toMilliseconds.toNat
+        IO.sleep (UInt32.ofNat ms)
+        env.withFrame (derived.fire a)
+    pure derived⟩
+
+/-- Debounce: only fire after the source has been quiet for the specified duration.
+
+    If the source fires rapidly (t1, t2, t3 where gaps < d), only one fire
+    occurs at t3+d with the value from t3.
+
+    Useful for text input where you want to wait until the user stops typing. -/
+def debounceM (d : Chronos.Duration) (e : Event Spider a) : SpiderM (Event Spider a) :=
+  ⟨fun env => do
+    let nodeId ← env.nextNodeId.modifyGet fun n => (NodeId.mk n, n + 1)
+    let derived ← Event.newNode nodeId (e.height.inc)
+    let generationRef ← IO.mkRef (0 : Nat)
+    let pendingValueRef ← IO.mkRef (none : Option a)
+
+    let _ ← e.subscribe fun a => do
+      -- Increment generation to "cancel" any pending fires
+      let gen ← generationRef.modifyGet fun g => (g + 1, g + 1)
+      pendingValueRef.set (some a)
+
+      -- Spawn async task that fires after quiet period
+      let _ ← IO.asTask (prio := .dedicated) do
+        let ms := d.toMilliseconds.toNat
+        IO.sleep (UInt32.ofNat ms)
+        -- Check if still the latest generation
+        let currentGen ← generationRef.get
+        if gen == currentGen then
+          match ← pendingValueRef.get with
+          | some v => env.withFrame (derived.fire v)
+          | none => pure ()
+    pure derived⟩
+
+/-- Throttle: rate limit to at most one fire per interval.
+
+    @param leading If true (default), fire immediately on first occurrence in interval
+    @param trailing If true (default), fire at end of interval if events occurred during cooldown -/
+def throttleM (d : Chronos.Duration) (e : Event Spider a)
+    (leading : Bool := true) (trailing : Bool := true) : SpiderM (Event Spider a) :=
+  ⟨fun env => do
+    let nodeId ← env.nextNodeId.modifyGet fun n => (NodeId.mk n, n + 1)
+    let derived ← Event.newNode nodeId (e.height.inc)
+    let lastFireTimeRef ← IO.mkRef (none : Option Nat)  -- milliseconds since start
+    let trailingValueRef ← IO.mkRef (none : Option a)
+    let trailingScheduledRef ← IO.mkRef false
+    let startTime ← IO.monoMsNow
+
+    let _ ← e.subscribe fun a => do
+      let now ← IO.monoMsNow
+      let elapsed := now - startTime
+      let lastFire ← lastFireTimeRef.get
+      let intervalMs := d.toMilliseconds.toNat
+
+      let shouldFireNow := match lastFire with
+        | none => leading
+        | some t => (elapsed - t >= intervalMs) && leading
+
+      if shouldFireNow then
+        lastFireTimeRef.set (some elapsed)
+        derived.fire a
+      else if trailing then
+        trailingValueRef.set (some a)
+        let alreadyScheduled ← trailingScheduledRef.get
+        if !alreadyScheduled then
+          trailingScheduledRef.set true
+          let _ ← IO.asTask (prio := .dedicated) do
+            let ms := intervalMs
+            IO.sleep (UInt32.ofNat ms)
+            trailingScheduledRef.set false
+            match ← trailingValueRef.get with
+            | some v =>
+              trailingValueRef.set none
+              let now' ← IO.monoMsNow
+              lastFireTimeRef.set (some (now' - startTime))
+              env.withFrame (derived.fire v)
+            | none => pure ()
+    pure derived⟩
 
 end Event
 

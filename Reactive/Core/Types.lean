@@ -84,6 +84,8 @@ instance : LE PendingFire where
 structure PropagationQueue where
   /-- Priority queue of pending fires, ordered by (height, nodeId) -/
   pending : Array PendingFire := #[]
+  /-- Pending fires for the next frame (used by delayFrame) -/
+  nextFramePending : Array PendingFire := #[]
   /-- Whether we're currently inside a propagation frame -/
   inFrame : Bool := false
   deriving Inhabited
