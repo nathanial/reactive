@@ -22,7 +22,11 @@ structure NodeId where
   deriving BEq, Hashable, Repr, Inhabited, Ord
 
 /-- Height in the dependency graph for topological ordering.
-    Higher nodes depend on lower nodes. Processing in height order prevents glitches. -/
+    Higher nodes depend on lower nodes. Processing in height order prevents glitches.
+
+    NOTE: Currently height is tracked but not actively used for ordering during
+    propagation. This infrastructure is scaffolding for future glitch-free
+    propagation implementation. See ROADMAP.md for details. -/
 structure Height where
   value : Nat := 0
   deriving BEq, Repr, Inhabited, Ord
@@ -47,12 +51,5 @@ def Height.inc (h : Height) : Height := ⟨h.value + 1⟩
 structure Frame where
   number : Nat
   deriving BEq, Repr, Inhabited
-
-/-- Propagation state during event firing -/
-structure PropagationState where
-  currentFrame : Frame
-  nextNodeId : Nat
-  nextSubscriberId : Nat
-  deriving Inhabited
 
 end Reactive

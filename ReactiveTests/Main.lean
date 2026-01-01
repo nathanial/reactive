@@ -2,6 +2,8 @@ import Crucible
 import ReactiveTests.EventTests
 import ReactiveTests.BehaviorTests
 import ReactiveTests.DynamicTests
+import ReactiveTests.SwitchTests
+import ReactiveTests.PropertyTests
 
 open Crucible
 

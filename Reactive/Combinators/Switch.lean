@@ -7,24 +7,6 @@ import Reactive.Core
 
 namespace Reactive
 
-/-- Switch to the event inside a behavior of events.
-    The resulting event fires whenever the "current" inner event fires.
-    When the behavior changes to a new event, the old subscription is dropped. -/
-def switch [Timeline t] (be : Behavior t (Event t a)) (nodeId : NodeId) : IO (Event t a) := do
-  let derived ← Event.newNode nodeId ⟨0⟩  -- Height depends on inner events
-  let currentUnsubRef ← IO.mkRef (pure () : IO Unit)
-
-  -- Initial subscription
-  let initialEvent ← be.sample
-  let unsub ← initialEvent.subscribe derived.fire
-  currentUnsubRef.set unsub
-
-  -- Note: This simplified version doesn't handle behavior changes
-  -- A full implementation would track when the behavior changes
-  -- and resubscribe to the new event
-
-  pure derived
-
 /-- Switch using a Dynamic of events.
     Uses the Dynamic's change event to know when to switch. -/
 def switchDyn [Timeline t] (de : Dynamic t (Event t a)) (nodeId : NodeId) : IO (Event t a) := do
@@ -53,30 +35,35 @@ def switchBehavior (bb : Behavior t (Behavior t a)) : Behavior t a :=
     let inner ← bb.sample
     inner.sample
 
-/-- Switch dynamics - like switchBehavior but preserves change events -/
+/-- Switch dynamics - like switchBehavior but preserves change events.
+    The result dynamic updates whenever:
+    1. The outer dynamic changes to a new inner dynamic
+    2. The current inner dynamic's value changes -/
 def switchDynamic [Timeline t] (dd : Dynamic t (Dynamic t a)) (nodeId : NodeId)
     : IO (Dynamic t a) := do
   let initialInner ← dd.sample
-  let (result, _) ← Dynamic.new (← initialInner.sample) nodeId
+  let initialValue ← initialInner.sample
+  let (result, updateResult) ← Dynamic.new initialValue nodeId
   let currentUnsubRef ← IO.mkRef (pure () : IO Unit)
 
   -- Helper to subscribe to an inner dynamic
   let subscribeToInner := fun (inner : Dynamic t a) => do
-    -- Unsubscribe from old
+    -- Unsubscribe from old inner
     let oldUnsub ← currentUnsubRef.get
     oldUnsub
-    -- Subscribe to inner changes
-    let unsub ← inner.updated.subscribe fun _ => do
-      -- We can't easily update the result dynamic here
-      -- This is a limitation of the simplified implementation
-      pure ()
+    -- Subscribe to new inner's changes
+    let unsub ← inner.updated.subscribe fun newValue => do
+      updateResult newValue
     currentUnsubRef.set unsub
+    -- Update with current value of new inner
+    let currentValue ← inner.sample
+    updateResult currentValue
 
-  -- Subscribe to initial inner dynamic
-  let unsub ← initialInner.updated.subscribe fun _ => pure ()
+  -- Subscribe to initial inner dynamic's changes
+  let unsub ← initialInner.updated.subscribe fun newValue => updateResult newValue
   currentUnsubRef.set unsub
 
-  -- When outer changes, switch to new inner
+  -- When outer changes to new inner dynamic, resubscribe
   let _ ← dd.updated.subscribe subscribeToInner
 
   pure result

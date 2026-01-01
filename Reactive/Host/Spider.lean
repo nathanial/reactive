@@ -70,6 +70,9 @@ instance : Monad SpiderM where
 instance : MonadLiftT IO SpiderM where
   monadLift io := ⟨fun _ => io⟩
 
+/-- Lift IO actions into SpiderM. Shorter alias for `liftM (m := IO)`. -/
+def liftIO (action : IO α) : SpiderM α := liftM (m := IO) action
+
 instance : MonadSample Spider SpiderM where
   sample b := ⟨fun _ => b.sample⟩
 
@@ -119,6 +122,44 @@ instance : PostBuild Spider SpiderM where
   getPostBuild := ⟨fun env => pure env.postBuildEvent⟩
 
 end SpiderM
+
+/-! ## Dynamic SpiderM Combinators
+
+These provide ergonomic versions of Dynamic operations that auto-allocate NodeIds,
+enabling Functor/Applicative-like usage within the SpiderM monad. -/
+
+namespace Dynamic
+
+/-- Map a function over a Dynamic, auto-allocating NodeId. -/
+def mapM (f : a → b) (da : Dynamic Spider a) : SpiderM (Dynamic Spider b) := do
+  let nodeId ← SpiderM.freshNodeId
+  SpiderM.liftIO <| Dynamic.map f da nodeId
+
+/-- Combine two Dynamics with a function, auto-allocating NodeId. -/
+def zipWithM (f : a → b → c) (da : Dynamic Spider a) (db : Dynamic Spider b)
+    : SpiderM (Dynamic Spider c) := do
+  let nodeId ← SpiderM.freshNodeId
+  SpiderM.liftIO <| Dynamic.zipWith f da db nodeId
+
+/-- Combine three Dynamics with a function, auto-allocating NodeIds. -/
+def zipWith3M (f : a → b → c → d)
+    (da : Dynamic Spider a) (db : Dynamic Spider b) (dc : Dynamic Spider c)
+    : SpiderM (Dynamic Spider d) := do
+  -- Implemented using zipWithM to avoid importing Combinators
+  let ab ← Dynamic.zipWithM Prod.mk da db
+  Dynamic.zipWithM (fun (a, b) c => f a b c) ab dc
+
+/-- Create a constant Dynamic that never changes.
+    Note: No NodeId needed since constant dynamics use Event.never. -/
+def pureM (x : a) : SpiderM (Dynamic Spider a) :=
+  SpiderM.liftIO <| Dynamic.constant x
+
+/-- Applicative apply for Dynamics, auto-allocating NodeId. -/
+def apM (df : Dynamic Spider (a → b)) (da : Dynamic Spider a)
+    : SpiderM (Dynamic Spider b) :=
+  Dynamic.zipWithM (fun f a => f a) df da
+
+end Dynamic
 
 /-- Run a Spider network and return the result -/
 def runSpider (network : SpiderM a) : IO a :=

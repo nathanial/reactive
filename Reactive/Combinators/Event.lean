@@ -81,12 +81,20 @@ def fanEither [Timeline t] (e : Event t (Sum a b)) (nodeIdL : NodeId) (nodeIdR :
   pure (leftEvent, rightEvent)
 
 /-- Delay an event by one propagation frame.
-    Useful for breaking dependency cycles. -/
+    Useful for breaking dependency cycles.
+
+    WARNING: This combinator is currently incomplete - it passes through
+    immediately without actual delay. A proper implementation requires
+    frame scheduling infrastructure.
+
+    TODO: Implement actual frame-based delay using:
+    1. A frame counter in SpiderEnv
+    2. A queue of pending fires for the next frame
+    3. A mechanism to advance frames (either time-based or explicit) -/
 def delay [Timeline t] (e : Event t a) (nodeId : NodeId) : IO (Event t a) := do
   let derived ← Event.newNode nodeId (e.height.inc)
   let _ ← e.subscribe fun a => do
-    -- In a real implementation, this would schedule for the next frame
-    -- For now, just pass through (simplified)
+    -- WARNING: No-op pass-through. See docstring for TODO.
     derived.fire a
   pure derived
 

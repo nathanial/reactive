@@ -4,6 +4,50 @@ This document outlines potential improvements, new features, and cleanup tasks f
 
 ---
 
+## Recently Completed
+
+### [DONE] Dynamic SpiderM Combinators
+
+Added ergonomic `SpiderM`-based combinators that auto-allocate NodeIds:
+- `Dynamic.mapM`, `Dynamic.zipWithM`, `Dynamic.zipWith3M`
+- `Dynamic.pureM`, `Dynamic.apM`
+
+Located in `Reactive/Host/Spider.lean`.
+
+### [DONE] Fix switchDynamic
+
+Fixed `switchDynamic` to properly propagate inner dynamic value changes using the update function from `Dynamic.new`.
+
+### [DONE] Remove Broken switch Combinator
+
+Removed `switch : Behavior t (Event t a) → Event t a` - it fundamentally cannot work because `Behavior` has no change notification. Users should use `switchDyn` with a `Dynamic` instead.
+
+### [DONE] Add liftIO Helper
+
+Added `SpiderM.liftIO` as a shorter alias for `liftM (m := IO)`.
+
+### [DONE] Remove PropagationState
+
+Removed unused `PropagationState` from `Types.lean`.
+
+### [DONE] Document Height as Scaffolding
+
+Added documentation noting that `Height` is tracked but not yet used for ordering - scaffolding for future glitch-free propagation.
+
+### [DONE] Document Incomplete delay
+
+Added WARNING/TODO to `delay` combinator noting it's currently a no-op pass-through.
+
+### [DONE] Add Plausible Property Tests
+
+Added 44 property tests covering boolean algebra, arithmetic, and function composition laws.
+
+### [DONE] Add Switch Combinator Tests
+
+Added comprehensive tests for `switchDyn`, `switchDynamic`, `switchHold`, and `switchBehavior`.
+
+---
+
 ## Feature Proposals
 
 ### [Priority: High] Proper Frame-Based Simultaneous Event Handling
