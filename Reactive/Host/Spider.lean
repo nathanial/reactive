@@ -416,6 +416,42 @@ def apM (df : Dynamic Spider (a → b)) (da : Dynamic Spider a)
     : SpiderM (Dynamic Spider b) :=
   Dynamic.zipWithM (fun f a => f a) df da
 
+/-! ### Fluent Chainable Combinators for Dynamic
+
+Extension methods enabling dot-notation chaining:
+```lean
+dynA.map' f |>.zipWith' g dynB
+-- or with bind
+dynA.map' f >>= (·.zipWith' g dynB)
+``` -/
+
+/-- Map a function over a Dynamic (fluent style).
+    Enables: `dynamic.map' f` -/
+def map' (da : Dynamic Spider a) (f : a → b) : SpiderM (Dynamic Spider b) :=
+  mapM f da
+
+/-- Combine with another Dynamic (fluent style).
+    Enables: `dynA.zipWith' f dynB` -/
+def zipWith' (da : Dynamic Spider a) (f : a → b → c) (db : Dynamic Spider b)
+    : SpiderM (Dynamic Spider c) :=
+  zipWithM f da db
+
+/-- Pair with another Dynamic (fluent style).
+    Enables: `dynA.zip' dynB` -/
+def zip' (da : Dynamic Spider a) (db : Dynamic Spider b) : SpiderM (Dynamic Spider (a × b)) :=
+  zipWithM Prod.mk da db
+
+/-- Combine with two other Dynamics (fluent style).
+    Enables: `dynA.zipWith3' f dynB dynC` -/
+def zipWith3' (da : Dynamic Spider a) (f : a → b → c → d)
+    (db : Dynamic Spider b) (dc : Dynamic Spider c) : SpiderM (Dynamic Spider d) :=
+  zipWith3M f da db dc
+
+/-- Apply a Dynamic function (fluent style).
+    Enables: `dynF.ap' dynA` -/
+def ap' (df : Dynamic Spider (a → b)) (da : Dynamic Spider a) : SpiderM (Dynamic Spider b) :=
+  apM df da
+
 end Dynamic
 
 /-! ## Behavior SpiderM Combinators
@@ -757,6 +793,99 @@ def throttleM (d : Chronos.Duration) (e : Event Spider a)
             | none => pure ()
     env.currentScope.register unsub
     pure derived⟩
+
+/-! ### Fluent Chainable Combinators
+
+Extension methods enabling dot-notation chaining:
+```lean
+event.map' f |>.filter' p |>.gate' behavior
+-- or with bind
+event.map' f >>= (·.filter' p)
+```
+
+These are wrappers around the standard combinators with flipped argument order. -/
+
+/-- Map a function over an Event (fluent style).
+    Enables: `event.map' f` instead of `Event.mapM f event` -/
+def map' (e : Event Spider a) (f : a → b) : SpiderM (Event Spider b) :=
+  mapM f e
+
+/-- Filter an Event by a predicate (fluent style).
+    Enables: `event.filter' p` -/
+def filter' (e : Event Spider a) (p : a → Bool) : SpiderM (Event Spider a) :=
+  filterM p e
+
+/-- Filter and map an Event (fluent style).
+    Enables: `event.mapMaybe' f` -/
+def mapMaybe' (e : Event Spider a) (f : a → Option b) : SpiderM (Event Spider b) :=
+  mapMaybeM f e
+
+/-- Merge with another Event (fluent style).
+    Enables: `event1.merge' event2` -/
+def merge' (e1 : Event Spider a) (e2 : Event Spider a) : SpiderM (Event Spider a) :=
+  mergeM e1 e2
+
+/-- Tag with a Behavior's value (fluent style).
+    Enables: `event.tag' behavior` -/
+def tag' (e : Event Spider b) (beh : Behavior Spider a) : SpiderM (Event Spider a) :=
+  tagM beh e
+
+/-- Attach a Behavior's value (fluent style).
+    Enables: `event.attach' behavior` -/
+def attach' (e : Event Spider c) (b : Behavior Spider a) : SpiderM (Event Spider (a × c)) :=
+  attachM b e
+
+/-- Attach with a combining function (fluent style).
+    Enables: `event.attachWith' f behavior` -/
+def attachWith' (e : Event Spider c) (f : a → c → d) (b : Behavior Spider a)
+    : SpiderM (Event Spider d) :=
+  attachWithM f b e
+
+/-- Gate by a Boolean Behavior (fluent style).
+    Enables: `event.gate' boolBehavior` -/
+def gate' (e : Event Spider a) (beh : Behavior Spider Bool) : SpiderM (Event Spider a) :=
+  gateM beh e
+
+/-- Take first n occurrences (fluent style).
+    Enables: `event.take' 5` -/
+def take' (e : Event Spider a) (n : Nat) : SpiderM (Event Spider a) :=
+  takeNM n e
+
+/-- Drop first n occurrences (fluent style).
+    Enables: `event.drop' 5` -/
+def drop' (e : Event Spider a) (n : Nat) : SpiderM (Event Spider a) :=
+  dropNM n e
+
+/-- Accumulate values (fluent style).
+    Enables: `event.scan' f initial` -/
+def scan' (e : Event Spider a) (f : a → b → b) (initial : b) : SpiderM (Event Spider b) :=
+  accumulateM f initial e
+
+/-- Delay by one frame (fluent style).
+    Enables: `event.delayFrame'` -/
+def delayFrame' (e : Event Spider a) : SpiderM (Event Spider a) :=
+  delayFrameM e
+
+/-- Delay by duration (fluent style).
+    Enables: `event.delay' duration` -/
+def delay' (e : Event Spider a) (d : Chronos.Duration) : SpiderM (Event Spider a) :=
+  delayDurationM d e
+
+/-- Debounce (fluent style).
+    Enables: `event.debounce' duration` -/
+def debounce' (e : Event Spider a) (d : Chronos.Duration) : SpiderM (Event Spider a) :=
+  debounceM d e
+
+/-- Throttle (fluent style).
+    Enables: `event.throttle' duration` -/
+def throttle' (e : Event Spider a) (d : Chronos.Duration)
+    (leading : Bool := true) (trailing : Bool := true) : SpiderM (Event Spider a) :=
+  throttleM d e leading trailing
+
+/-- Split Sum into two events (fluent style).
+    Enables: `event.fanEither'` -/
+def fanEither' (e : Event Spider (Sum a b)) : SpiderM (Event Spider a × Event Spider b) :=
+  fanEitherM e
 
 end Event
 

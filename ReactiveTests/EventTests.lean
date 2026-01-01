@@ -224,6 +224,58 @@ test "Event.leftmostM takes first from list" := do
     SpiderM.liftIO receivedRef.get
   shouldBe result [1, 2, 3]
 
+test "Fluent Event.map' enables chaining" := do
+  let result ← runSpider do
+    let (event, trigger) ← newTriggerEvent (t := Spider) (a := Nat)
+    -- Use explicit form: Event.map' event f
+    let mapped ← Event.map' event (· * 2)
+
+    let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
+    let _ ← SpiderM.liftIO <| mapped.subscribe fun n =>
+      receivedRef.modify (· ++ [n])
+
+    SpiderM.liftIO <| trigger 1
+    SpiderM.liftIO <| trigger 2
+    SpiderM.liftIO <| trigger 3
+    SpiderM.liftIO receivedRef.get
+  shouldBe result [2, 4, 6]
+
+test "Fluent chaining with bind" := do
+  let result ← runSpider do
+    let (event, trigger) ← newTriggerEvent (t := Spider) (a := Nat)
+    -- Chain: map then filter using bind with explicit form
+    let processed ← Event.map' event (· * 2) >>= (Event.filter' · (· > 3))
+
+    let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
+    let _ ← SpiderM.liftIO <| processed.subscribe fun n =>
+      receivedRef.modify (· ++ [n])
+
+    SpiderM.liftIO <| trigger 1  -- 1*2=2, filtered out (not > 3)
+    SpiderM.liftIO <| trigger 2  -- 2*2=4, passes
+    SpiderM.liftIO <| trigger 3  -- 3*2=6, passes
+    SpiderM.liftIO receivedRef.get
+  shouldBe result [4, 6]
+
+test "Fluent Event.gate' and merge'" := do
+  let result ← runSpider do
+    let (e1, t1) ← newTriggerEvent (t := Spider) (a := Nat)
+    let (e2, t2) ← newTriggerEvent (t := Spider) (a := Nat)
+    let gateBehavior := Behavior.constant true
+
+    -- Gate e1 and merge with e2 using explicit form
+    let gated ← Event.gate' e1 gateBehavior
+    let merged ← Event.merge' gated e2
+
+    let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
+    let _ ← SpiderM.liftIO <| merged.subscribe fun n =>
+      receivedRef.modify (· ++ [n])
+
+    SpiderM.liftIO <| t1 1
+    SpiderM.liftIO <| t2 2
+    SpiderM.liftIO <| t1 3
+    SpiderM.liftIO receivedRef.get
+  shouldBe result [1, 2, 3]
+
 #generate_tests
 
 end ReactiveTests.EventTests

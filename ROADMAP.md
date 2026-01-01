@@ -300,19 +300,15 @@ Fixed `Event.mergeList` to properly batch simultaneous events into a single list
 
 ---
 
-### [Priority: Medium] Behavior from Dynamic Event
+### [DONE] Behavior from Dynamic Event
 
-**Description:** Add a combinator to create a `Behavior t a` from an initial value and an update `Event t a`.
+Implemented as part of "Behavior.hold and foldB Combinators" in Recently Completed section.
 
-**Rationale:** Currently `MonadHold.hold` is available but a simpler pure function would be useful when you only need the sampling capability without the `Dynamic`'s update event.
-
-**Affected Files:**
-- `/Users/Shared/Projects/lean-workspace/data/reactive/Reactive/Core/Behavior.lean`
-- `/Users/Shared/Projects/lean-workspace/data/reactive/Reactive/Class/MonadHold.lean`
-
-**Estimated Effort:** Small
-
-**Dependencies:** None
+Available functions:
+- `Behavior.hold` - Pure IO version
+- `Behavior.foldB` - Pure IO version with fold
+- `Behavior.holdM` - SpiderM version with scope registration
+- `Behavior.foldBM` - SpiderM version with fold and scope registration
 
 ---
 
@@ -522,25 +518,32 @@ Completed as part of frame-based glitch-free propagation. Heights are now used f
 
 ## API Enhancements
 
-### [Priority: Medium] Fluent/Chainable Event Combinators
+### [DONE] Fluent/Chainable Event Combinators
 
-**Current State:** Event combinators require separate function calls with explicit node IDs:
+Added fluent combinators with event-first argument order for easier chaining:
+
+**Event Fluent Combinators:**
 ```lean
-let mapped ← Event.map f event nodeId1
-let filtered ← Event.filter p mapped nodeId2
+-- Chain with monadic bind
+Event.map' event (· * 2) >>= (Event.filter' · (· > 3))
+
+-- Available: map', filter', mapMaybe', merge', tag', attach',
+-- attachWith', gate', take', drop', scan', delayFrame',
+-- delay', debounce', throttle', fanEither'
 ```
 
-**Proposed Change:** Add extension methods or a builder pattern for fluent chaining:
+**Dynamic Fluent Combinators:**
 ```lean
-let result ← event.mapM f >>= filterM p
+Dynamic.map' dynA f >>= (Dynamic.zipWith' · g dynB)
+
+-- Available: map', zipWith', zip', zipWith3', ap'
 ```
 
-**Benefits:** More readable and composable code
+**Note:** Dot notation (`event.map' f`) doesn't work due to Lean 4's namespace resolution - the type is `Reactive.Event` but combinators are in `Reactive.Host.Event`. Use explicit form `Event.map' event f` instead.
 
-**Affected Files:**
-- `/Users/Shared/Projects/lean-workspace/data/reactive/Reactive/Combinators/Event.lean`
-
-**Estimated Effort:** Medium
+**Files Modified:**
+- `Reactive/Host/Spider.lean` (fluent combinators for Event and Dynamic)
+- `ReactiveTests/EventTests.lean` (3 new tests)
 
 ---
 
