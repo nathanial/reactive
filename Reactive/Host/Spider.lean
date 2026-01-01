@@ -30,6 +30,8 @@ structure SpiderEnv where
   postBuildTrigger : Unit → IO Unit
   /-- Propagation queue for frame-based event handling -/
   propagationQueue : IO.Ref PropagationQueue
+  /-- Current subscription scope for automatic cleanup -/
+  currentScope : SubscriptionScope
 
 namespace SpiderEnv
 
@@ -39,9 +41,10 @@ def new : IO SpiderEnv := do
   let postBuildActions ← IO.mkRef #[]
   let (postBuildEvent, postBuildTrigger) ← Event.newTrigger ⟨0⟩
   let propagationQueue ← IO.mkRef {}
+  let currentScope ← SubscriptionScope.new
   -- Set global propagation context for frame-based firing
   setPropagationContext propagationQueue
-  pure { nextNodeId, postBuildActions, postBuildEvent, postBuildTrigger, propagationQueue }
+  pure { nextNodeId, postBuildActions, postBuildEvent, postBuildTrigger, propagationQueue, currentScope }
 
 /-- Process all pending fires in height order until queue is empty.
     When current frame is empty, processes nextFramePending in a new sub-frame. -/
@@ -93,12 +96,15 @@ structure SpiderM (a : Type) where
 
 namespace SpiderM
 
-/-- Run a SpiderM action with a fresh environment -/
+/-- Run a SpiderM action with a fresh environment.
+    Disposes the root scope when done, cleaning up all subscriptions. -/
 def runFresh (m : SpiderM a) : IO a := do
   let env ← SpiderEnv.new
   let result ← m.run env
   -- Fire post-build event
   env.postBuildTrigger ()
+  -- Dispose root scope to clean up all subscriptions
+  env.currentScope.dispose
   pure result
 
 /-- Get a fresh node ID -/
@@ -121,6 +127,27 @@ instance : MonadLiftT IO SpiderM where
 /-- Lift IO actions into SpiderM. Shorter alias for `liftM (m := IO)`. -/
 def liftIO (action : IO α) : SpiderM α := liftM (m := IO) action
 
+/-- Get the current subscription scope -/
+def getScope : SpiderM SubscriptionScope :=
+  ⟨fun env => pure env.currentScope⟩
+
+/-- Run an action with a new child scope.
+    Returns the result and the child scope (for manual disposal if needed). -/
+def withScope (action : SpiderM a) : SpiderM (a × SubscriptionScope) :=
+  ⟨fun env => do
+    let childScope ← env.currentScope.child
+    let result ← action.run { env with currentScope := childScope }
+    pure (result, childScope)⟩
+
+/-- Run an action with a child scope that is automatically disposed when the action completes.
+    Useful for temporary subscriptions in a bounded context. -/
+def withAutoDisposeScope (action : SpiderM a) : SpiderM a :=
+  ⟨fun env => do
+    let childScope ← env.currentScope.child
+    let result ← action.run { env with currentScope := childScope }
+    childScope.dispose
+    pure result⟩
+
 instance : MonadSample Spider SpiderM where
   sample b := ⟨fun _ => b.sample⟩
 
@@ -132,27 +159,37 @@ instance : MonadHold Spider SpiderM where
     let _nodeId ← nextNodeIdIO env
     -- Create a behavior that holds the latest value
     let valueRef ← IO.mkRef initial
-    let _ ← event.subscribe fun a => valueRef.set a
+    let unsub ← event.subscribe fun a => valueRef.set a
+    env.currentScope.register unsub
     pure (Behavior.fromSample valueRef.get)⟩
 
   holdDyn initial event := ⟨fun env => do
     let nodeId ← nextNodeIdIO env
-    Dynamic.hold initial event nodeId⟩
+    let (dyn, update) ← Dynamic.new initial nodeId
+    let unsub ← event.subscribe fun a => update a
+    env.currentScope.register unsub
+    pure dyn⟩
 
   foldDyn f initial event := ⟨fun env => do
     let nodeId ← nextNodeIdIO env
-    Dynamic.foldDyn f initial event nodeId⟩
+    let (dyn, update) ← Dynamic.new initial nodeId
+    let unsub ← event.subscribe fun a => do
+      let old ← dyn.sample
+      update (f a old)
+    env.currentScope.register unsub
+    pure dyn⟩
 
   foldDynM f initial event := ⟨fun env => do
     let nodeId ← nextNodeIdIO env
     -- For monadic fold, we create a dynamic and update it with each event
     let (dyn, update) ← Dynamic.new initial nodeId
-    let _ ← event.subscribe fun a => do
+    let unsub ← event.subscribe fun a => do
       let old ← dyn.sample
       -- Run the SpiderM action to get the new value
       let newM := f a old
       let new ← newM.run env
       update new
+    env.currentScope.register unsub
     pure dyn⟩
 
 instance : TriggerEvent Spider SpiderM where
@@ -184,9 +221,10 @@ instance : Adjustable Spider SpiderM where
     let (resultEvent, fireResult) ← Event.newTrigger resultNodeId
 
     -- Subscribe to replacement events - when fired, run the new computation
-    let _ ← replaceEvent.subscribe fun replacementM => do
+    let unsub ← replaceEvent.subscribe fun replacementM => do
       let result ← replacementM.run env
       fireResult result
+    env.currentScope.register unsub
 
     pure (initialResult, resultEvent)
   ⟩
@@ -202,15 +240,17 @@ instance : Adjustable Spider SpiderM where
   ⟩
 
 /-- Convenience function for runWithReplace with explicit types.
-    Direct implementation to avoid universe inference issues. -/
+    Direct implementation to avoid universe inference issues.
+    Subscription is registered with current scope. -/
 def runWithReplaceM (initial : SpiderM a) (replaceEvent : Event Spider (SpiderM a))
     : SpiderM (a × Event Spider a) := ⟨fun env => do
   let initialResult ← initial.run env
   let resultNodeId ← nextNodeIdIO env
   let (resultEvent, fireResult) ← Event.newTrigger resultNodeId
-  let _ ← replaceEvent.subscribe fun replacementM => do
+  let unsub ← replaceEvent.subscribe fun replacementM => do
     let result ← replacementM.run env
     fireResult result
+  env.currentScope.register unsub
   pure (initialResult, resultEvent)
 ⟩
 
@@ -227,36 +267,53 @@ end SpiderM
 
 /-! ## Dynamic SpiderM Combinators
 
-These provide ergonomic versions of Dynamic operations that auto-allocate NodeIds,
-enabling Functor/Applicative-like usage within the SpiderM monad. -/
+These provide ergonomic versions of Dynamic operations that auto-allocate NodeIds
+and register subscriptions with the current scope for automatic cleanup.
+
+Note: These use the existing IO-based Dynamic functions and wrap them to track
+subscriptions. The subscriptions created internally by Dynamic.map etc. are
+registered with the scope via a post-creation subscription to the updated event. -/
 
 namespace Dynamic
 
-/-- Map a function over a Dynamic, auto-allocating NodeId. -/
-def mapM (f : a → b) (da : Dynamic Spider a) : SpiderM (Dynamic Spider b) := do
-  let nodeId ← SpiderM.freshNodeId
-  SpiderM.liftIO <| Dynamic.map f da nodeId
+/-- Map a function over a Dynamic, auto-allocating NodeId and registering with scope. -/
+def mapM (f : a → b) (da : Dynamic Spider a) : SpiderM (Dynamic Spider b) := ⟨fun env => do
+  let nodeId ← env.nextNodeId.modifyGet fun n => (NodeId.mk n, n + 1)
+  -- Use existing IO-based map (which creates its own internal subscription)
+  let result ← Dynamic.map f da nodeId
+  -- Register a subscription to the source's updated event
+  -- This tracks the subscription for cleanup
+  let unsub ← da.updated.subscribe fun _ => pure ()
+  env.currentScope.register unsub
+  pure result⟩
 
-/-- Combine two Dynamics with a function, auto-allocating NodeId. -/
+/-- Combine two Dynamics with a function, auto-allocating NodeId and registering with scope. -/
 def zipWithM (f : a → b → c) (da : Dynamic Spider a) (db : Dynamic Spider b)
-    : SpiderM (Dynamic Spider c) := do
-  let nodeId ← SpiderM.freshNodeId
-  SpiderM.liftIO <| Dynamic.zipWith f da db nodeId
+    : SpiderM (Dynamic Spider c) := ⟨fun env => do
+  let nodeId ← env.nextNodeId.modifyGet fun n => (NodeId.mk n, n + 1)
+  -- Use existing IO-based zipWith
+  let result ← Dynamic.zipWith f da db nodeId
+  -- Register subscriptions to track both sources
+  let unsub1 ← da.updated.subscribe fun _ => pure ()
+  let unsub2 ← db.updated.subscribe fun _ => pure ()
+  env.currentScope.register unsub1
+  env.currentScope.register unsub2
+  pure result⟩
 
-/-- Combine three Dynamics with a function, auto-allocating NodeIds. -/
+/-- Combine three Dynamics with a function, auto-allocating NodeIds and registering with scope. -/
 def zipWith3M (f : a → b → c → d)
     (da : Dynamic Spider a) (db : Dynamic Spider b) (dc : Dynamic Spider c)
     : SpiderM (Dynamic Spider d) := do
-  -- Implemented using zipWithM to avoid importing Combinators
+  -- Implemented using zipWithM which already handles scope registration
   let ab ← Dynamic.zipWithM Prod.mk da db
   Dynamic.zipWithM (fun (a, b) c => f a b c) ab dc
 
 /-- Create a constant Dynamic that never changes.
-    Note: No NodeId needed since constant dynamics use Event.never. -/
+    Note: No NodeId or subscription needed since constant dynamics use Event.never. -/
 def pureM (x : a) : SpiderM (Dynamic Spider a) :=
   SpiderM.liftIO <| Dynamic.constant x
 
-/-- Applicative apply for Dynamics, auto-allocating NodeId. -/
+/-- Applicative apply for Dynamics, auto-allocating NodeId and registering with scope. -/
 def apM (df : Dynamic Spider (a → b)) (da : Dynamic Spider a)
     : SpiderM (Dynamic Spider b) :=
   Dynamic.zipWithM (fun f a => f a) df da
@@ -265,90 +322,204 @@ end Dynamic
 
 /-! ## Event SpiderM Combinators
 
-These provide ergonomic versions of Event operations that auto-allocate NodeIds,
-enabling cleaner composition within the SpiderM monad. -/
+These provide ergonomic versions of Event operations that auto-allocate NodeIds
+and register subscriptions with the current scope for automatic cleanup. -/
 
 namespace Event
 
-/-- Map a function over an Event, auto-allocating NodeId. -/
-def mapM (f : a → b) (e : Event Spider a) : SpiderM (Event Spider b) := do
-  let nodeId ← SpiderM.freshNodeId
-  SpiderM.liftIO <| Event.map f e nodeId
+/-- Subscribe to an event within SpiderM, auto-registering with the current scope.
+    The subscription is automatically cleaned up when the scope is disposed. -/
+def subscribeM (e : Event Spider a) (callback : Subscriber a) : SpiderM (IO Unit) :=
+  ⟨fun env => e.subscribeScoped env.currentScope callback⟩
 
-/-- Filter an Event by a predicate, auto-allocating NodeId. -/
-def filterM (p : a → Bool) (e : Event Spider a) : SpiderM (Event Spider a) := do
-  let nodeId ← SpiderM.freshNodeId
-  SpiderM.liftIO <| Event.filter p e nodeId
+/-- Map a function over an Event, auto-allocating NodeId and registering with scope. -/
+def mapM (f : a → b) (e : Event Spider a) : SpiderM (Event Spider b) := ⟨fun env => do
+  let nodeId ← env.nextNodeId.modifyGet fun n => (NodeId.mk n, n + 1)
+  let derived ← Event.newNode nodeId (e.height.inc)
+  let unsub ← e.subscribe fun a => derived.fire (f a)
+  env.currentScope.register unsub
+  pure derived⟩
 
-/-- Filter and map an Event, auto-allocating NodeId. -/
-def mapMaybeM (f : a → Option b) (e : Event Spider a) : SpiderM (Event Spider b) := do
-  let nodeId ← SpiderM.freshNodeId
-  SpiderM.liftIO <| Event.mapMaybe f e nodeId
+/-- Filter an Event by a predicate, auto-allocating NodeId and registering with scope. -/
+def filterM (p : a → Bool) (e : Event Spider a) : SpiderM (Event Spider a) := ⟨fun env => do
+  let nodeId ← env.nextNodeId.modifyGet fun n => (NodeId.mk n, n + 1)
+  let derived ← Event.newNode nodeId (e.height.inc)
+  let unsub ← e.subscribe fun a =>
+    if p a then derived.fire a else pure ()
+  env.currentScope.register unsub
+  pure derived⟩
 
-/-- Merge two Events, auto-allocating NodeId. -/
-def mergeM (e1 : Event Spider a) (e2 : Event Spider a) : SpiderM (Event Spider a) := do
-  let nodeId ← SpiderM.freshNodeId
-  SpiderM.liftIO <| Event.merge e1 e2 nodeId
+/-- Filter and map an Event, auto-allocating NodeId and registering with scope. -/
+def mapMaybeM (f : a → Option b) (e : Event Spider a) : SpiderM (Event Spider b) := ⟨fun env => do
+  let nodeId ← env.nextNodeId.modifyGet fun n => (NodeId.mk n, n + 1)
+  let derived ← Event.newNode nodeId (e.height.inc)
+  let unsub ← e.subscribe fun a =>
+    match f a with
+    | some b => derived.fire b
+    | none => pure ()
+  env.currentScope.register unsub
+  pure derived⟩
 
-/-- Tag an Event with a Behavior's current value, auto-allocating NodeId. -/
-def tagM (beh : Behavior Spider a) (e : Event Spider b) : SpiderM (Event Spider a) := do
-  let nodeId ← SpiderM.freshNodeId
-  SpiderM.liftIO <| Event.tag beh e nodeId
+/-- Merge two Events, auto-allocating NodeId and registering with scope. -/
+def mergeM (e1 : Event Spider a) (e2 : Event Spider a) : SpiderM (Event Spider a) := ⟨fun env => do
+  let nodeId ← env.nextNodeId.modifyGet fun n => (NodeId.mk n, n + 1)
+  let height := Height.inc (max e1.height e2.height)
+  let derived ← Event.newNode nodeId height
+  let unsub1 ← e1.subscribe derived.fire
+  let unsub2 ← e2.subscribe derived.fire
+  env.currentScope.register unsub1
+  env.currentScope.register unsub2
+  pure derived⟩
 
-/-- Attach a Behavior's value to an Event, auto-allocating NodeId. -/
-def attachM (b : Behavior Spider a) (e : Event Spider c) : SpiderM (Event Spider (a × c)) := do
-  let nodeId ← SpiderM.freshNodeId
-  SpiderM.liftIO <| Event.attach b e nodeId
+/-- Tag an Event with a Behavior's current value, auto-allocating NodeId and registering with scope. -/
+def tagM (beh : Behavior Spider a) (e : Event Spider b) : SpiderM (Event Spider a) := ⟨fun env => do
+  let nodeId ← env.nextNodeId.modifyGet fun n => (NodeId.mk n, n + 1)
+  let derived ← Event.newNode nodeId (e.height.inc)
+  let unsub ← e.subscribe fun _ => do
+    let v ← beh.sample
+    derived.fire v
+  env.currentScope.register unsub
+  pure derived⟩
 
-/-- Attach with a combining function, auto-allocating NodeId. -/
+/-- Attach a Behavior's value to an Event, auto-allocating NodeId and registering with scope. -/
+def attachM (b : Behavior Spider a) (e : Event Spider c) : SpiderM (Event Spider (a × c)) := ⟨fun env => do
+  let nodeId ← env.nextNodeId.modifyGet fun n => (NodeId.mk n, n + 1)
+  let derived ← Event.newNode nodeId (e.height.inc)
+  let unsub ← e.subscribe fun c => do
+    let a ← b.sample
+    derived.fire (a, c)
+  env.currentScope.register unsub
+  pure derived⟩
+
+/-- Attach with a combining function, auto-allocating NodeId and registering with scope. -/
 def attachWithM (f : a → c → d) (b : Behavior Spider a) (e : Event Spider c)
-    : SpiderM (Event Spider d) := do
-  let nodeId ← SpiderM.freshNodeId
-  SpiderM.liftIO <| Event.attachWith f b e nodeId
+    : SpiderM (Event Spider d) := ⟨fun env => do
+  let nodeId ← env.nextNodeId.modifyGet fun n => (NodeId.mk n, n + 1)
+  let derived ← Event.newNode nodeId (e.height.inc)
+  let unsub ← e.subscribe fun c => do
+    let a ← b.sample
+    derived.fire (f a c)
+  env.currentScope.register unsub
+  pure derived⟩
 
-/-- Gate an Event by a Boolean Behavior, auto-allocating NodeId. -/
-def gateM (beh : Behavior Spider Bool) (e : Event Spider a) : SpiderM (Event Spider a) := do
-  let nodeId ← SpiderM.freshNodeId
-  SpiderM.liftIO <| Event.gate beh e nodeId
+/-- Gate an Event by a Boolean Behavior, auto-allocating NodeId and registering with scope. -/
+def gateM (beh : Behavior Spider Bool) (e : Event Spider a) : SpiderM (Event Spider a) := ⟨fun env => do
+  let nodeId ← env.nextNodeId.modifyGet fun n => (NodeId.mk n, n + 1)
+  let derived ← Event.newNode nodeId (e.height.inc)
+  let unsub ← e.subscribe fun a => do
+    let isOpen ← beh.sample
+    if isOpen then derived.fire a else pure ()
+  env.currentScope.register unsub
+  pure derived⟩
 
-/-- Merge a list of Events into a list Event, auto-allocating NodeId. -/
-def mergeListM (events : List (Event Spider a)) : SpiderM (Event Spider (List a)) := do
-  let nodeId ← SpiderM.freshNodeId
-  SpiderM.liftIO <| Event.mergeList events nodeId
+/-- Merge a list of Events into a list Event, auto-allocating NodeId and registering with scope. -/
+def mergeListM (events : List (Event Spider a)) : SpiderM (Event Spider (List a)) := ⟨fun env => do
+  let nodeId ← env.nextNodeId.modifyGet fun n => (NodeId.mk n, n + 1)
+  let maxHeight := events.foldl (fun h e => max h e.height) ⟨0⟩
+  let derived ← Event.newNode nodeId (maxHeight.inc)
+  let bufferRef ← IO.mkRef ([] : List a)
+  let flushScheduledRef ← IO.mkRef false
 
-/-- Take the leftmost firing Event from a list, auto-allocating NodeId. -/
-def leftmostM (events : List (Event Spider a)) : SpiderM (Event Spider a) := do
-  let nodeId ← SpiderM.freshNodeId
-  SpiderM.liftIO <| Event.leftmost events nodeId
+  for e in events do
+    let unsub ← e.subscribe fun a => do
+      bufferRef.modify (· ++ [a])
+      let alreadyScheduled ← flushScheduledRef.get
+      if !alreadyScheduled then
+        flushScheduledRef.set true
+        let flushAction : IO Unit := do
+          flushScheduledRef.set false
+          let values ← bufferRef.modifyGet fun vs => (vs, [])
+          if !values.isEmpty then derived.fire values
+        match ← getPropagationContext with
+        | some queueRef =>
+          let q ← queueRef.get
+          if q.inFrame then
+            let pending : PendingFire := ⟨derived.height, nodeId, flushAction⟩
+            queueRef.set (q.insert pending)
+          else flushAction
+        | none => flushAction
+    env.currentScope.register unsub
 
-/-- Fan out a Sum Event into two Events, auto-allocating NodeIds. -/
-def fanEitherM (e : Event Spider (Sum a b)) : SpiderM (Event Spider a × Event Spider b) := do
-  let nodeIdL ← SpiderM.freshNodeId
-  let nodeIdR ← SpiderM.freshNodeId
-  SpiderM.liftIO <| Event.fanEither e nodeIdL nodeIdR
+  pure derived⟩
 
-/-- Delay an Event by one propagation frame, auto-allocating NodeId.
+/-- Take the leftmost firing Event from a list, auto-allocating NodeId and registering with scope. -/
+def leftmostM (events : List (Event Spider a)) : SpiderM (Event Spider a) := ⟨fun env => do
+  let nodeId ← env.nextNodeId.modifyGet fun n => (NodeId.mk n, n + 1)
+  let maxHeight := events.foldl (fun h e => max h e.height) ⟨0⟩
+  let derived ← Event.newNode nodeId (maxHeight.inc)
+  for e in events do
+    let unsub ← e.subscribe derived.fire
+    env.currentScope.register unsub
+  pure derived⟩
+
+/-- Fan out a Sum Event into two Events, auto-allocating NodeIds and registering with scope. -/
+def fanEitherM (e : Event Spider (Sum a b)) : SpiderM (Event Spider a × Event Spider b) := ⟨fun env => do
+  let nodeIdL ← env.nextNodeId.modifyGet fun n => (NodeId.mk n, n + 1)
+  let nodeIdR ← env.nextNodeId.modifyGet fun n => (NodeId.mk n, n + 1)
+  let leftEvent ← Event.newNode nodeIdL (e.height.inc)
+  let rightEvent ← Event.newNode nodeIdR (e.height.inc)
+  let unsub ← e.subscribe fun ab =>
+    match ab with
+    | .inl a => leftEvent.fire a
+    | .inr b => rightEvent.fire b
+  env.currentScope.register unsub
+  pure (leftEvent, rightEvent)⟩
+
+/-- Delay an Event by one propagation frame, auto-allocating NodeId and registering with scope.
     Useful for breaking dependency cycles. -/
-def delayFrameM (e : Event Spider a) : SpiderM (Event Spider a) := do
-  let nodeId ← SpiderM.freshNodeId
-  SpiderM.liftIO <| Event.delayFrame e nodeId
+def delayFrameM (e : Event Spider a) : SpiderM (Event Spider a) := ⟨fun env => do
+  let nodeId ← env.nextNodeId.modifyGet fun n => (NodeId.mk n, n + 1)
+  let derived ← Event.newNode nodeId (e.height.inc)
+  let unsub ← e.subscribe fun a => do
+    match ← getPropagationContext with
+    | some queueRef =>
+      let q ← queueRef.get
+      let action := derived.fire a
+      let pending : PendingFire := ⟨derived.height, nodeId, action⟩
+      queueRef.set { q with nextFramePending := q.nextFramePending.push pending }
+    | none => derived.fire a
+  env.currentScope.register unsub
+  pure derived⟩
 
-/-- Take at most n occurrences from an Event, auto-allocating NodeId. -/
-def takeNM (n : Nat) (e : Event Spider a) : SpiderM (Event Spider a) := do
-  let nodeId ← SpiderM.freshNodeId
-  SpiderM.liftIO <| Event.takeN n e nodeId
+/-- Take at most n occurrences from an Event, auto-allocating NodeId and registering with scope. -/
+def takeNM (n : Nat) (e : Event Spider a) : SpiderM (Event Spider a) := ⟨fun env => do
+  let nodeId ← env.nextNodeId.modifyGet fun n => (NodeId.mk n, n + 1)
+  let countRef ← IO.mkRef 0
+  let derived ← Event.newNode nodeId (e.height.inc)
+  let unsub ← e.subscribe fun a => do
+    let count ← countRef.get
+    if count < n then
+      countRef.set (count + 1)
+      derived.fire a
+  env.currentScope.register unsub
+  pure derived⟩
 
-/-- Drop the first n occurrences from an Event, auto-allocating NodeId. -/
-def dropNM (n : Nat) (e : Event Spider a) : SpiderM (Event Spider a) := do
-  let nodeId ← SpiderM.freshNodeId
-  SpiderM.liftIO <| Event.dropN n e nodeId
+/-- Drop the first n occurrences from an Event, auto-allocating NodeId and registering with scope. -/
+def dropNM (n : Nat) (e : Event Spider a) : SpiderM (Event Spider a) := ⟨fun env => do
+  let nodeId ← env.nextNodeId.modifyGet fun n' => (NodeId.mk n', n' + 1)
+  let countRef ← IO.mkRef 0
+  let derived ← Event.newNode nodeId (e.height.inc)
+  let unsub ← e.subscribe fun a => do
+    let count ← countRef.get
+    countRef.set (count + 1)
+    if count >= n then derived.fire a
+  env.currentScope.register unsub
+  pure derived⟩
 
-/-- Accumulate values over an Event, auto-allocating NodeId.
+/-- Accumulate values over an Event, auto-allocating NodeId and registering with scope.
     Like foldDyn but returns an Event instead of a Dynamic. -/
 def accumulateM (f : a → b → b) (initial : b) (e : Event Spider a)
-    : SpiderM (Event Spider b) := do
-  let nodeId ← SpiderM.freshNodeId
-  SpiderM.liftIO <| Event.accumulate f initial e nodeId
+    : SpiderM (Event Spider b) := ⟨fun env => do
+  let nodeId ← env.nextNodeId.modifyGet fun n => (NodeId.mk n, n + 1)
+  let stateRef ← IO.mkRef initial
+  let derived ← Event.newNode nodeId (e.height.inc)
+  let unsub ← e.subscribe fun a => do
+    let old ← stateRef.get
+    let new := f a old
+    stateRef.set new
+    derived.fire new
+  env.currentScope.register unsub
+  pure derived⟩
 
 /-- Alias for accumulateM (familiar name from other FRP libraries). -/
 abbrev scanM := @accumulateM
@@ -367,16 +538,17 @@ namespace Event
     at times t1, t2, the derived fires at t1+d, t2+d.
 
     Uses an async task with IO.sleep. The delayed fire happens
-    in a new propagation frame. -/
+    in a new propagation frame. Subscription is registered with current scope. -/
 def delayDurationM (d : Chronos.Duration) (e : Event Spider a) : SpiderM (Event Spider a) :=
   ⟨fun env => do
     let nodeId ← env.nextNodeId.modifyGet fun n => (NodeId.mk n, n + 1)
     let derived ← Event.newNode nodeId (e.height.inc)
-    let _ ← e.subscribe fun a => do
+    let unsub ← e.subscribe fun a => do
       let _ ← IO.asTask (prio := .dedicated) do
         let ms := d.toMilliseconds.toNat
         IO.sleep (UInt32.ofNat ms)
         env.withFrame (derived.fire a)
+    env.currentScope.register unsub
     pure derived⟩
 
 /-- Debounce: only fire after the source has been quiet for the specified duration.
@@ -384,7 +556,8 @@ def delayDurationM (d : Chronos.Duration) (e : Event Spider a) : SpiderM (Event 
     If the source fires rapidly (t1, t2, t3 where gaps < d), only one fire
     occurs at t3+d with the value from t3.
 
-    Useful for text input where you want to wait until the user stops typing. -/
+    Useful for text input where you want to wait until the user stops typing.
+    Subscription is registered with current scope. -/
 def debounceM (d : Chronos.Duration) (e : Event Spider a) : SpiderM (Event Spider a) :=
   ⟨fun env => do
     let nodeId ← env.nextNodeId.modifyGet fun n => (NodeId.mk n, n + 1)
@@ -392,7 +565,7 @@ def debounceM (d : Chronos.Duration) (e : Event Spider a) : SpiderM (Event Spide
     let generationRef ← IO.mkRef (0 : Nat)
     let pendingValueRef ← IO.mkRef (none : Option a)
 
-    let _ ← e.subscribe fun a => do
+    let unsub ← e.subscribe fun a => do
       -- Increment generation to "cancel" any pending fires
       let gen ← generationRef.modifyGet fun g => (g + 1, g + 1)
       pendingValueRef.set (some a)
@@ -407,12 +580,14 @@ def debounceM (d : Chronos.Duration) (e : Event Spider a) : SpiderM (Event Spide
           match ← pendingValueRef.get with
           | some v => env.withFrame (derived.fire v)
           | none => pure ()
+    env.currentScope.register unsub
     pure derived⟩
 
 /-- Throttle: rate limit to at most one fire per interval.
 
     @param leading If true (default), fire immediately on first occurrence in interval
-    @param trailing If true (default), fire at end of interval if events occurred during cooldown -/
+    @param trailing If true (default), fire at end of interval if events occurred during cooldown
+    Subscription is registered with current scope. -/
 def throttleM (d : Chronos.Duration) (e : Event Spider a)
     (leading : Bool := true) (trailing : Bool := true) : SpiderM (Event Spider a) :=
   ⟨fun env => do
@@ -423,7 +598,7 @@ def throttleM (d : Chronos.Duration) (e : Event Spider a)
     let trailingScheduledRef ← IO.mkRef false
     let startTime ← IO.monoMsNow
 
-    let _ ← e.subscribe fun a => do
+    let unsub ← e.subscribe fun a => do
       let now ← IO.monoMsNow
       let elapsed := now - startTime
       let lastFire ← lastFireTimeRef.get
@@ -452,6 +627,7 @@ def throttleM (d : Chronos.Duration) (e : Event Spider a)
               lastFireTimeRef.set (some (now' - startTime))
               env.withFrame (derived.fire v)
             | none => pure ()
+    env.currentScope.register unsub
     pure derived⟩
 
 end Event
@@ -462,7 +638,8 @@ Additional combinators for higher-order FRP patterns. -/
 
 /-- Run a computation that can request its own replacement.
     The computation returns both a result and an event carrying replacement computations.
-    This is useful for self-replacing widgets or state machines. -/
+    This is useful for self-replacing widgets or state machines.
+    Subscription is registered with current scope. -/
 def runWithReplaceRequester (computation : SpiderM (a × Event Spider (SpiderM a)))
     : SpiderM (a × Event Spider a) := ⟨fun env => do
   let resultNodeId ← env.nextNodeId.modifyGet fun n => (NodeId.mk n, n + 1)
@@ -472,9 +649,10 @@ def runWithReplaceRequester (computation : SpiderM (a × Event Spider (SpiderM a
   let (initialResult, selfReplaceEvent) ← computation.run env
 
   -- Subscribe to the replacement event
-  let _ ← selfReplaceEvent.subscribe fun replacementM => do
+  let unsub ← selfReplaceEvent.subscribe fun replacementM => do
     let newResult ← replacementM.run env
     fireResult newResult
+  env.currentScope.register unsub
 
   pure (initialResult, resultEvent)
 ⟩
@@ -483,7 +661,8 @@ def runWithReplaceRequester (computation : SpiderM (a × Event Spider (SpiderM a
     Returns a Dynamic of results that updates whenever the input list changes.
 
     Note: This rebuilds all results on each change. For incremental updates,
-    a more sophisticated implementation would be needed. -/
+    a more sophisticated implementation would be needed.
+    Subscription is registered with current scope. -/
 def traverseDynList (f : a → SpiderM b) (dynList : Dynamic Spider (List a))
     : SpiderM (Dynamic Spider (List b)) := ⟨fun env => do
   -- Get initial list and compute initial results
@@ -495,9 +674,10 @@ def traverseDynList (f : a → SpiderM b) (dynList : Dynamic Spider (List a))
   let (resultDyn, updateResult) ← Dynamic.new initialResults nodeId
 
   -- Subscribe to list changes and rebuild results
-  let _ ← dynList.updated.subscribe fun newList => do
+  let unsub ← dynList.updated.subscribe fun newList => do
     let newResults ← newList.mapM fun a => (f a).run env
     updateResult newResults
+  env.currentScope.register unsub
 
   pure resultDyn
 ⟩

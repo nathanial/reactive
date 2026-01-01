@@ -5,6 +5,7 @@
   Events are push-based with subscriber management.
 -/
 import Reactive.Core.Types
+import Reactive.Core.Scope
 
 namespace Reactive
 
@@ -126,6 +127,14 @@ def newTrigger [Timeline t] (nodeId : NodeId) : IO (Event t a × (a → IO Unit)
 /-- Subscribe to an event -/
 def subscribe (e : Event t a) (callback : Subscriber a) : IO (IO Unit) :=
   e.node.subscribe callback
+
+/-- Subscribe with scope-based cleanup.
+    The subscription is automatically unsubscribed when the scope is disposed. -/
+def subscribeScoped (e : Event t a) (scope : SubscriptionScope)
+    (callback : Subscriber a) : IO (IO Unit) := do
+  let unsub ← e.node.subscribe callback
+  scope.register unsub
+  pure unsub
 
 /-- Fire an event (internal use - normally done via trigger) -/
 protected def fire (e : Event t a) (value : a) : IO Unit :=

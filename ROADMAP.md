@@ -131,30 +131,45 @@ Implemented the `Adjustable` typeclass enabling higher-order FRP patterns:
 - `ReactiveTests/AdjustableTests.lean` (new test file with 8 tests)
 - `ReactiveTests/Main.lean` (import AdjustableTests)
 
+### [DONE] Scope-Based Subscription Management
+
+Implemented `SubscriptionScope` for automatic subscription cleanup:
+
+**Core Features:**
+- `SubscriptionScope.new` - Create a new scope
+- `SubscriptionScope.child` - Create child scope (auto-disposed with parent)
+- `SubscriptionScope.register` - Register unsubscribe action
+- `SubscriptionScope.dispose` - Run all unsubscribe actions
+
+**SpiderM Integration:**
+- `SpiderEnv.currentScope` - Current scope in the monad environment
+- `SpiderM.getScope` - Access current scope
+- `SpiderM.withScope` - Run with child scope (returns scope for manual disposal)
+- `SpiderM.withAutoDisposeScope` - Run with child scope that auto-disposes
+- `Event.subscribeM` - Subscribe with automatic scope registration
+- `Event.subscribeScoped` - IO-based scoped subscription
+
+**Updated Combinators:**
+All SpiderM combinators now register subscriptions with the current scope:
+- Event: `mapM`, `filterM`, `mapMaybeM`, `mergeM`, `tagM`, `attachM`, `attachWithM`, `gateM`, `mergeListM`, `leftmostM`, `fanEitherM`, `delayFrameM`, `takeNM`, `dropNM`, `accumulateM`, `delayDurationM`, `debounceM`, `throttleM`
+- Dynamic: `mapM`, `zipWithM`, `zipWith3M`
+- MonadHold: `hold`, `holdDyn`, `foldDyn`, `foldDynM`
+- Adjustable: `runWithReplace`, `runWithReplaceM`, `runWithReplaceRequester`, `traverseDynList`
+
+**Automatic Cleanup:**
+`runSpider` now disposes the root scope when the network terminates, automatically cleaning up all registered subscriptions.
+
+**Files Modified:**
+- `Reactive/Core/Scope.lean` (new - SubscriptionScope type)
+- `Reactive/Core/Event.lean` (subscribeScoped)
+- `Reactive/Core.lean` (import Scope)
+- `Reactive/Host/Spider.lean` (scope in SpiderEnv, all combinator updates)
+- `ReactiveTests/ScopeTests.lean` (new - 16 tests)
+- `ReactiveTests/Main.lean` (import ScopeTests)
+
 ---
 
 ## Feature Proposals
-
-### [Priority: High] Memory Management and Subscription Cleanup
-
-**Description:** Implement proper subscription lifecycle management to prevent memory leaks in long-running applications.
-
-**Rationale:** Currently, subscriptions are created but the unsubscribe actions are not systematically tracked or called. In long-running applications (e.g., UI frameworks), this leads to memory leaks as old subscriptions accumulate. Need:
-1. Automatic cleanup when derived events are no longer referenced
-2. Weak reference support or explicit disposal patterns
-3. Subscription scope management (e.g., cleanup all subscriptions in a widget when it's removed)
-
-**Affected Files:**
-- `/Users/Shared/Projects/lean-workspace/data/reactive/Reactive/Core/Event.lean`
-- `/Users/Shared/Projects/lean-workspace/data/reactive/Reactive/Core/Dynamic.lean`
-- `/Users/Shared/Projects/lean-workspace/data/reactive/Reactive/Combinators/Switch.lean`
-- `/Users/Shared/Projects/lean-workspace/data/reactive/Reactive/Host/Spider.lean`
-
-**Estimated Effort:** Medium
-
-**Dependencies:** None
-
----
 
 ### [DONE] Proper delay Combinator Implementation
 
