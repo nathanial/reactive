@@ -59,26 +59,26 @@ Located in `Reactive/Host/Spider.lean`.
 
 Added `Event.scan` as an alias for `Event.accumulate` (familiar name from other FRP libraries). Like `foldDyn` but returns an Event instead of a Dynamic.
 
+### [DONE] Frame-Based Glitch-Free Propagation
+
+Implemented true frame-based event handling with height-ordered processing:
+- Added `PendingFire` and `PropagationQueue` types for queueing events by (height, nodeId)
+- External triggers start a propagation frame via `SpiderEnv.withFrame`
+- Events are processed in height order using priority queue semantics
+- Derived events enqueue to the current frame instead of firing immediately
+- Stable insertion maintains FIFO order for events at the same height/nodeId
+
+This prevents glitches where derived nodes would see inconsistent intermediate states. Now all height-1 events process before height-2 events, etc.
+
+**Files Modified:**
+- `Reactive/Core/Types.lean` (PendingFire, PropagationQueue)
+- `Reactive/Core/Event.lean` (global propagation context, modified fire)
+- `Reactive/Host/Spider.lean` (withFrame, drainQueue, framed triggers)
+- `ReactiveTests/PropagationTests.lean` (new test suite)
+
 ---
 
 ## Feature Proposals
-
-### [Priority: High] Proper Frame-Based Simultaneous Event Handling
-
-**Description:** Implement true simultaneous event handling where events fired in the same propagation frame are collected and processed together according to their height order.
-
-**Rationale:** The current implementation fires events individually without coordinating simultaneous occurrences. This can lead to glitches where derived nodes see inconsistent intermediate states. A proper FRP implementation should process all events at the same height level before moving to higher levels.
-
-**Affected Files:**
-- `/Users/Shared/Projects/lean-workspace/data/reactive/Reactive/Core/Types.lean` (Frame, PropagationState)
-- `/Users/Shared/Projects/lean-workspace/data/reactive/Reactive/Core/Event.lean` (EventNode.fire)
-- `/Users/Shared/Projects/lean-workspace/data/reactive/Reactive/Host/Spider.lean` (SpiderEnv, propagation logic)
-
-**Estimated Effort:** Large
-
-**Dependencies:** None
-
----
 
 ### [Priority: High] Complete Adjustable Implementation
 
@@ -92,7 +92,7 @@ Added `Event.scan` as an alias for `Event.accumulate` (familiar name from other 
 
 **Estimated Effort:** Large
 
-**Dependencies:** Frame-based simultaneous event handling may simplify this implementation
+**Dependencies:** None (frame-based propagation is now complete)
 
 ---
 
@@ -132,7 +132,7 @@ Added `Event.scan` as an alias for `Event.accumulate` (familiar name from other 
 
 **Estimated Effort:** Medium
 
-**Dependencies:** Frame-based event handling
+**Dependencies:** None (frame-based propagation is now complete)
 
 ---
 
@@ -166,7 +166,7 @@ Added `Event.scan` as an alias for `Event.accumulate` (familiar name from other 
 
 **Estimated Effort:** Medium
 
-**Dependencies:** Frame-based simultaneous event handling
+**Dependencies:** None (frame-based propagation is now complete)
 
 ---
 
@@ -198,21 +198,6 @@ Added `Event.scan` as an alias for `Event.accumulate` (familiar name from other 
 **Affected Files:**
 - `/Users/Shared/Projects/lean-workspace/data/reactive/Reactive/Core/Behavior.lean`
 - `/Users/Shared/Projects/lean-workspace/data/reactive/Reactive/Class/MonadHold.lean`
-
-**Estimated Effort:** Small
-
-**Dependencies:** None
-
----
-
-### [Priority: Medium] Event scan/scanM Combinators
-
-**Description:** Add `scan` and `scanM` combinators that emit accumulated values on each event, similar to `foldDyn` but as events rather than dynamics.
-
-**Rationale:** Sometimes you want the stream of accumulated values as events without the overhead of maintaining a dynamic. This is a common pattern in stream processing.
-
-**Affected Files:**
-- `/Users/Shared/Projects/lean-workspace/data/reactive/Reactive/Combinators/Event.lean`
 
 **Estimated Effort:** Small
 
@@ -380,17 +365,9 @@ Added `Event.scan` as an alias for `Event.accumulate` (familiar name from other 
 
 ---
 
-### [Priority: Medium] Implement Height-Based Propagation Ordering
+### [DONE] Implement Height-Based Propagation Ordering
 
-**Issue:** The `Height` type exists as scaffolding for glitch-free propagation, but heights are not yet used for topological sorting during propagation.
-
-**Location:**
-- `/Users/Shared/Projects/lean-workspace/data/reactive/Reactive/Core/Types.lean` (Height documented as scaffolding)
-- `/Users/Shared/Projects/lean-workspace/data/reactive/Reactive/Core/Event.lean`
-
-**Action Required:** Implement proper height-based propagation ordering (see Frame-Based Event Handling feature).
-
-**Estimated Effort:** Large (part of frame-based event handling)
+Completed as part of frame-based glitch-free propagation. Heights are now used for ordering events in the propagation queue.
 
 ---
 
@@ -405,6 +382,7 @@ Added `Event.scan` as an alias for `Event.accumulate` (familiar name from other 
 **Progress:**
 - ✓ Added switch combinator tests (`ReactiveTests/SwitchTests.lean`)
 - ✓ Added property tests for FRP laws (`ReactiveTests/PropertyTests.lean`)
+- ✓ Added propagation tests for frame-based ordering (`ReactiveTests/PropagationTests.lean`)
 
 **Location:** `/Users/Shared/Projects/lean-workspace/data/reactive/ReactiveTests/`
 

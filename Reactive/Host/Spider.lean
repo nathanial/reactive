@@ -27,13 +27,47 @@ structure SpiderEnv where
   postBuildEvent : Event Spider Unit
   /-- Trigger for the post-build event -/
   postBuildTrigger : Unit → IO Unit
+  /-- Propagation queue for frame-based event handling -/
+  propagationQueue : IO.Ref PropagationQueue
+
+namespace SpiderEnv
 
 /-- Create a new Spider environment -/
-def SpiderEnv.new : IO SpiderEnv := do
+def new : IO SpiderEnv := do
   let nextNodeId ← IO.mkRef 1  -- Start at 1, reserve 0 for special use
   let postBuildActions ← IO.mkRef #[]
   let (postBuildEvent, postBuildTrigger) ← Event.newTrigger ⟨0⟩
-  pure { nextNodeId, postBuildActions, postBuildEvent, postBuildTrigger }
+  let propagationQueue ← IO.mkRef {}
+  -- Set global propagation context for frame-based firing
+  setPropagationContext propagationQueue
+  pure { nextNodeId, postBuildActions, postBuildEvent, postBuildTrigger, propagationQueue }
+
+/-- Process all pending fires in height order until queue is empty -/
+partial def drainQueue (env : SpiderEnv) : IO Unit := do
+  let q ← env.propagationQueue.get
+  match q.popMin? with
+  | none => return ()  -- Queue empty, done
+  | some (pending, q') =>
+    env.propagationQueue.set q'
+    pending.fire  -- Execute the fire action
+    env.drainQueue  -- Continue draining
+
+/-- Execute an action within a propagation frame.
+    If already in a frame, just runs the action (it will enqueue).
+    If not in a frame, starts a new frame, runs action, then drains queue. -/
+def withFrame (env : SpiderEnv) (action : IO Unit) : IO Unit := do
+  let q ← env.propagationQueue.get
+  if q.inFrame then
+    -- Already in a frame, just run (fires will enqueue)
+    action
+  else
+    -- Start new frame
+    env.propagationQueue.set { q with inFrame := true }
+    action
+    env.drainQueue
+    env.propagationQueue.modify fun q => { q with inFrame := false }
+
+end SpiderEnv
 
 /-- The Spider monad for building reactive networks.
 
@@ -111,12 +145,17 @@ instance : MonadHold Spider SpiderM where
 instance : TriggerEvent Spider SpiderM where
   newTriggerEvent := ⟨fun env => do
     let nodeId ← nextNodeIdIO env
-    Event.newTrigger nodeId⟩
+    let (event, rawTrigger) ← Event.newTrigger nodeId
+    -- Wrap trigger to use frame semantics for glitch-free propagation
+    let framedTrigger := fun a => env.withFrame (rawTrigger a)
+    pure (event, framedTrigger)⟩
 
   newEventWithTrigger setup := ⟨fun env => do
     let nodeId ← nextNodeIdIO env
-    let (event, trigger) ← Event.newTrigger nodeId
-    setup trigger
+    let (event, rawTrigger) ← Event.newTrigger nodeId
+    -- Wrap trigger to use frame semantics
+    let framedTrigger := fun a => env.withFrame (rawTrigger a)
+    setup framedTrigger
     pure event⟩
 
 instance : PostBuild Spider SpiderM where

@@ -24,9 +24,9 @@ structure NodeId where
 /-- Height in the dependency graph for topological ordering.
     Higher nodes depend on lower nodes. Processing in height order prevents glitches.
 
-    NOTE: Currently height is tracked but not actively used for ordering during
-    propagation. This infrastructure is scaffolding for future glitch-free
-    propagation implementation. See ROADMAP.md for details. -/
+    Events are queued by (height, nodeId) in the propagation queue and processed
+    in ascending order. This ensures all lower-height events fire before higher-height
+    ones, preventing glitches where derived nodes see inconsistent intermediate states. -/
 structure Height where
   value : Nat := 0
   deriving BEq, Repr, Inhabited, Ord
@@ -51,5 +51,71 @@ def Height.inc (h : Height) : Height := ⟨h.value + 1⟩
 structure Frame where
   number : Nat
   deriving BEq, Repr, Inhabited
+
+/-! ## Propagation Queue Infrastructure
+
+The propagation queue enables glitch-free event handling by processing events
+in height order within each frame. -/
+
+/-- A pending event occurrence waiting to be propagated.
+    Stores the height and nodeId for ordering, plus the fire action as a closure. -/
+structure PendingFire where
+  height : Height
+  nodeId : NodeId
+  fire : IO Unit
+  deriving Inhabited
+
+/-- Compare pending fires for priority queue ordering.
+    Lower height fires first; ties broken by nodeId for determinism. -/
+instance : Ord PendingFire where
+  compare a b :=
+    match compare a.height b.height with
+    | .eq => compare a.nodeId b.nodeId
+    | other => other
+
+instance : LT PendingFire where
+  lt a b := compare a b == .lt
+
+instance : LE PendingFire where
+  le a b := compare a b != .gt
+
+/-- Propagation state during a frame.
+    The pending array is kept sorted by (height, nodeId). -/
+structure PropagationQueue where
+  /-- Priority queue of pending fires, ordered by (height, nodeId) -/
+  pending : Array PendingFire := #[]
+  /-- Whether we're currently inside a propagation frame -/
+  inFrame : Bool := false
+  deriving Inhabited
+
+namespace PropagationQueue
+
+/-- Find insertion index for a pending fire in sorted array.
+    Uses stable insertion: equal elements are inserted after existing ones (FIFO). -/
+private def findInsertIdx (arr : Array PendingFire) (p : PendingFire) : Nat :=
+  -- Linear search for simplicity; could optimize to binary search later
+  -- Use != .gt (i.e., ≤) for stable insertion
+  arr.foldl (init := 0) fun idx existing =>
+    if compare existing p != .gt then idx + 1 else idx
+
+/-- Insert a pending fire into the sorted queue -/
+def insert (q : PropagationQueue) (p : PendingFire) : PropagationQueue :=
+  let idx := findInsertIdx q.pending p
+  -- Build new array with element inserted at idx
+  let before := q.pending.extract 0 idx
+  let after := q.pending.extract idx q.pending.size
+  { q with pending := before.push p ++ after }
+
+/-- Pop the minimum (lowest height) pending fire -/
+def popMin? (q : PropagationQueue) : Option (PendingFire × PropagationQueue) :=
+  if h : 0 < q.pending.size then
+    some (q.pending[0], { q with pending := q.pending.eraseIdx 0 })
+  else
+    none
+
+/-- Check if the queue is empty -/
+def isEmpty (q : PropagationQueue) : Bool := q.pending.isEmpty
+
+end PropagationQueue
 
 end Reactive

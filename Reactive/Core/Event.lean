@@ -8,6 +8,29 @@ import Reactive.Core.Types
 
 namespace Reactive
 
+/-! ## Global Propagation Context
+
+The propagation context enables frame-based event handling. When set, events
+are queued by height instead of firing immediately, preventing glitches. -/
+
+/-- Global propagation context for frame-based firing.
+    When `some`, events enqueue to the referenced queue instead of firing immediately.
+    Set by SpiderEnv when entering a frame, read by EventNode.fire. -/
+private initialize globalPropagationQueue : IO.Ref (Option (IO.Ref PropagationQueue)) ←
+  IO.mkRef none
+
+/-- Set the global propagation context for frame-based firing -/
+def setPropagationContext (queue : IO.Ref PropagationQueue) : IO Unit :=
+  globalPropagationQueue.set (some queue)
+
+/-- Clear the global propagation context -/
+def clearPropagationContext : IO Unit :=
+  globalPropagationQueue.set none
+
+/-- Get the current propagation context -/
+def getPropagationContext : IO (Option (IO.Ref PropagationQueue)) :=
+  globalPropagationQueue.get
+
 /-- A subscriber callback that receives event values -/
 abbrev Subscriber (a : Type) := a → IO Unit
 
@@ -39,11 +62,31 @@ def subscribe (node : EventNode a) (callback : Subscriber a) : IO (IO Unit) := d
     node.subscribers.modify fun subs =>
       subs.filter (·.1 != subId)
 
-/-- Fire this event with a value, notifying all subscribers -/
+/-- Fire this event with a value, notifying all subscribers.
+    If a propagation context is active and we're in a frame, the fire is
+    enqueued for height-ordered processing. Otherwise fires immediately. -/
 def fire (node : EventNode a) (value : a) : IO Unit := do
-  let subs ← node.subscribers.get
-  for (_, callback) in subs do
-    callback value
+  match ← getPropagationContext with
+  | none =>
+    -- No propagation context, fire immediately
+    let subs ← node.subscribers.get
+    for (_, callback) in subs do
+      callback value
+  | some queueRef =>
+    let q ← queueRef.get
+    if q.inFrame then
+      -- We're in a frame, enqueue for height-ordered processing
+      let action : IO Unit := do
+        let subs ← node.subscribers.get
+        for (_, callback) in subs do
+          callback value
+      let pending : PendingFire := ⟨node.height, node.nodeId, action⟩
+      queueRef.set (q.insert pending)
+    else
+      -- Context exists but not in frame, fire immediately
+      let subs ← node.subscribers.get
+      for (_, callback) in subs do
+        callback value
 
 /-- Get the number of subscribers -/
 def subscriberCount (node : EventNode a) : IO Nat := do
