@@ -113,36 +113,55 @@ structure Event (t : Type) (a : Type) where
 
 namespace Event
 
-/-- Create a new event node (internal use) -/
-protected def newNode [Timeline t] (nodeId : NodeId) (height : Height := ⟨0⟩) : IO (Event t a) := do
+/-- Create a new event node (internal use).
+    Requires a TimelineCtx for type-safe timeline separation. -/
+protected def newNode [Timeline t] (ctx : TimelineCtx t) (height : Height := ⟨0⟩) : IO (Event t a) := do
+  let nodeId ← ctx.freshNodeId
+  let node ← EventNode.new nodeId height
+  pure ⟨node⟩
+
+/-- Create a new event node with explicit NodeId (internal use).
+    Prefer `newNode` which auto-allocates NodeIds. -/
+protected def newNodeWithId [Timeline t] (nodeId : NodeId) (height : Height := ⟨0⟩) : IO (Event t a) := do
   let node ← EventNode.new nodeId height
   pure ⟨node⟩
 
 /-- The event that never fires.
 
     Useful as a placeholder or for constant dynamics.
+    Requires a TimelineCtx for type-safe timeline separation.
 
     Example:
     ```
-    let neverFires ← Event.never (t := Spider)
+    -- Within SpiderM:
+    let neverFires ← Event.neverM (t := Spider)
     -- This event will never fire, so subscribers are never called
     ``` -/
-def never [Timeline t] : IO (Event t a) := do
-  Event.newNode ⟨0⟩  -- ID 0 reserved for never
+def never [Timeline t] (ctx : TimelineCtx t) : IO (Event t a) := do
+  Event.newNode ctx
 
 /-- Create a new triggerable event.
     Returns the event and a function to fire it.
+    Requires a TimelineCtx for type-safe timeline separation.
 
     This is the primary way to create events that can be fired from external code.
     The returned trigger function fires the event when called.
 
     Example:
     ```
-    let (clickEvent, fireClick) ← Event.newTrigger nodeId
+    -- Within SpiderM, use newTriggerEvent instead:
+    let (clickEvent, fireClick) ← newTriggerEvent (t := Spider) (a := Unit)
     -- Later, to fire the event:
     fireClick ()
     ``` -/
-def newTrigger [Timeline t] (nodeId : NodeId) : IO (Event t a × (a → IO Unit)) := do
+def newTrigger [Timeline t] (ctx : TimelineCtx t) : IO (Event t a × (a → IO Unit)) := do
+  let nodeId ← ctx.freshNodeId
+  let node ← EventNode.new nodeId
+  pure (⟨node⟩, node.fire)
+
+/-- Create a new triggerable event with explicit NodeId (internal use).
+    Prefer the SpiderM `newTriggerEvent` which handles context automatically. -/
+def newTriggerWithId [Timeline t] (nodeId : NodeId) : IO (Event t a × (a → IO Unit)) := do
   let node ← EventNode.new nodeId
   pure (⟨node⟩, node.fire)
 
@@ -182,51 +201,91 @@ def height (e : Event t a) : Height :=
 def nodeId (e : Event t a) : NodeId :=
   e.node.nodeId
 
+/-- Helper to create a derived event from a source event (with explicit NodeId).
+    Creates a new event at source.height + 1 and subscribes with the given handler.
+    The handler receives the source value and the derived event's fire function. -/
+private def deriveWithId [Timeline t] (source : Event t a) (derivedNodeId : NodeId)
+    (handler : a → (b → IO Unit) → IO Unit) : IO (Event t b) := do
+  let derived ← Event.newNodeWithId derivedNodeId (source.height.inc)
+  let _ ← source.subscribe fun a => handler a derived.fire
+  pure derived
+
 /-- Helper to create a derived event from a source event.
     Creates a new event at source.height + 1 and subscribes with the given handler.
     The handler receives the source value and the derived event's fire function. -/
-private def deriveWith [Timeline t] (source : Event t a) (derivedNodeId : NodeId)
+private def deriveWith [Timeline t] (ctx : TimelineCtx t) (source : Event t a)
     (handler : a → (b → IO Unit) → IO Unit) : IO (Event t b) := do
-  let derived ← Event.newNode derivedNodeId (source.height.inc)
-  let _ ← source.subscribe fun a => handler a derived.fire
-  pure derived
+  let nodeId ← ctx.freshNodeId
+  deriveWithId source nodeId handler
+
+/-- Map a function over event values (with explicit NodeId).
+    Creates a new derived event that transforms values from the source. -/
+def mapWithId [Timeline t] (f : a → b) (source : Event t a) (derivedNodeId : NodeId) : IO (Event t b) :=
+  deriveWithId source derivedNodeId fun a fire => fire (f a)
 
 /-- Map a function over event values.
     Creates a new derived event that transforms values from the source.
 
     Example:
     ```
-    let doubled ← Event.map (· * 2) numberEvent nodeId
+    -- Within SpiderM, prefer Event.mapM:
+    let doubled ← Event.mapM (· * 2) numberEvent
     -- When numberEvent fires 5, doubled fires 10
     ``` -/
-def map [Timeline t] (f : a → b) (source : Event t a) (derivedNodeId : NodeId) : IO (Event t b) :=
-  deriveWith source derivedNodeId fun a fire => fire (f a)
+def map [Timeline t] (ctx : TimelineCtx t) (f : a → b) (source : Event t a) : IO (Event t b) :=
+  deriveWith ctx source fun a fire => fire (f a)
+
+/-- Filter event occurrences by a predicate (with explicit NodeId).
+    Only values that satisfy the predicate pass through. -/
+def filterWithId [Timeline t] (p : a → Bool) (source : Event t a) (derivedNodeId : NodeId) : IO (Event t a) :=
+  deriveWithId source derivedNodeId fun a fire =>
+    if p a then fire a else pure ()
 
 /-- Filter event occurrences by a predicate.
     Only values that satisfy the predicate pass through.
 
     Example:
     ```
-    let positives ← Event.filter (· > 0) numberEvent nodeId
+    -- Within SpiderM, prefer Event.filterM:
+    let positives ← Event.filterM (· > 0) numberEvent
     -- When numberEvent fires -5, 3, 0, 7: positives fires 3, 7
     ``` -/
-def filter [Timeline t] (p : a → Bool) (source : Event t a) (derivedNodeId : NodeId) : IO (Event t a) :=
-  deriveWith source derivedNodeId fun a fire =>
+def filter [Timeline t] (ctx : TimelineCtx t) (p : a → Bool) (source : Event t a) : IO (Event t a) :=
+  deriveWith ctx source fun a fire =>
     if p a then fire a else pure ()
+
+/-- Filter and map simultaneously (with explicit NodeId).
+    Only `some` results pass through; `none` results are dropped. -/
+def mapMaybeWithId [Timeline t] (f : a → Option b) (source : Event t a) (derivedNodeId : NodeId) : IO (Event t b) :=
+  deriveWithId source derivedNodeId fun a fire =>
+    match f a with
+    | some b => fire b
+    | none => pure ()
 
 /-- Filter and map simultaneously.
     Only `some` results pass through; `none` results are dropped.
 
     Example:
     ```
-    let parsed ← Event.mapMaybe String.toNat? stringEvent nodeId
+    -- Within SpiderM, prefer Event.mapMaybeM:
+    let parsed ← Event.mapMaybeM String.toNat? stringEvent
     -- When stringEvent fires "42", "hello", "7": parsed fires 42, 7
     ``` -/
-def mapMaybe [Timeline t] (f : a → Option b) (source : Event t a) (derivedNodeId : NodeId) : IO (Event t b) :=
-  deriveWith source derivedNodeId fun a fire =>
+def mapMaybe [Timeline t] (ctx : TimelineCtx t) (f : a → Option b) (source : Event t a) : IO (Event t b) :=
+  deriveWith ctx source fun a fire =>
     match f a with
     | some b => fire b
     | none => pure ()
+
+/-- Merge two events into one (with explicit NodeId).
+    When either fires, the merged event fires with that value.
+    When both fire simultaneously (same frame), both values are delivered. -/
+def mergeWithId [Timeline t] (e1 : Event t a) (e2 : Event t a) (derivedNodeId : NodeId) : IO (Event t a) := do
+  let height := Height.inc (max e1.height e2.height)
+  let derived ← Event.newNodeWithId derivedNodeId height
+  let _ ← e1.subscribe derived.fire
+  let _ ← e2.subscribe derived.fire
+  pure derived
 
 /-- Merge two events into one.
     When either fires, the merged event fires with that value.
@@ -234,15 +293,13 @@ def mapMaybe [Timeline t] (f : a → Option b) (source : Event t a) (derivedNode
 
     Example:
     ```
-    let combined ← Event.merge clickEvent keyEvent nodeId
+    -- Within SpiderM, prefer Event.mergeM:
+    let combined ← Event.mergeM clickEvent keyEvent
     -- Fires when either click or key fires
     ``` -/
-def merge [Timeline t] (e1 : Event t a) (e2 : Event t a) (derivedNodeId : NodeId) : IO (Event t a) := do
-  let height := Height.inc (max e1.height e2.height)
-  let derived ← Event.newNode derivedNodeId height
-  let _ ← e1.subscribe derived.fire
-  let _ ← e2.subscribe derived.fire
-  pure derived
+def merge [Timeline t] (ctx : TimelineCtx t) (e1 : Event t a) (e2 : Event t a) : IO (Event t a) := do
+  let nodeId ← ctx.freshNodeId
+  mergeWithId e1 e2 nodeId
 
 end Event
 

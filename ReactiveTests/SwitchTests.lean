@@ -21,7 +21,7 @@ test "switchDyn switches to new event when dynamic changes" := do
 
     -- Create switched event
     let nodeId ← SpiderM.freshNodeId
-    let switched ← SpiderM.liftIO <| switchDyn dynEvent nodeId
+    let switched ← SpiderM.liftIO <| switchDynWithId dynEvent nodeId
 
     -- Collect fired values
     let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
@@ -60,7 +60,7 @@ test "switchDynamic propagates inner dynamic changes" := do
 
     -- Create switched dynamic
     let nodeId ← SpiderM.freshNodeId
-    let switched ← SpiderM.liftIO <| switchDynamic outer nodeId
+    let switched ← SpiderM.liftIO <| switchDynamicWithId outer nodeId
 
     -- Check initial value
     let v0 ← SpiderM.liftIO <| switched.sample
@@ -96,7 +96,7 @@ test "switchDynamic fires update events" := do
     let outer ← holdDyn inner1 switchEvent
 
     let nodeId ← SpiderM.freshNodeId
-    let switched ← SpiderM.liftIO <| switchDynamic outer nodeId
+    let switched ← SpiderM.liftIO <| switchDynamicWithId outer nodeId
 
     -- Track update events
     let updatesRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
@@ -119,7 +119,7 @@ test "switchHold switches on event occurrence" := do
     let (switchEvent, switchTrigger) ← newTriggerEvent (t := Spider) (a := Event Spider Nat)
 
     let nodeId ← SpiderM.freshNodeId
-    let switched ← SpiderM.liftIO <| switchHold e1 switchEvent nodeId
+    let switched ← SpiderM.liftIO <| switchHoldWithId e1 switchEvent nodeId
 
     let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
     let _ ← SpiderM.liftIO <| switched.subscribe fun n =>

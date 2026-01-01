@@ -192,6 +192,33 @@ Added comprehensive docstrings with examples to core Event functions:
 - `Event.subscribeScoped`
 - `Event.map`, `filter`, `mapMaybe`, `merge`
 
+### [DONE] Type-Safe Timeline Separation
+
+Implemented compile-time enforcement preventing mixing events from different timelines:
+
+**Core Change:**
+- Added `TimelineCtx (t : Type) [Timeline t]` evidence type with private constructor
+- Only host implementations (e.g., SpiderM) can create `TimelineCtx`
+- Event/Dynamic creation functions now require `TimelineCtx` parameter
+
+**API Split Pattern:**
+- `functionWithId` variants: Take explicit `NodeId`, have `[Timeline t]` constraint
+- `function` variants: Take `TimelineCtx t`, auto-generate NodeId
+
+**SpiderM Integration:**
+- `SpiderEnv.timelineCtx : TimelineCtx Spider` - Provides context for combinators
+- `SpiderM.getTimelineCtx` - Access the timeline context
+- All `*M` combinators use `*WithId` functions internally
+
+**Files Modified:**
+- `Reactive/Core/Types.lean` (TimelineCtx type)
+- `Reactive/Core/Event.lean` (newNode/newNodeWithId, newTrigger/newTriggerWithId, map/mapWithId, etc.)
+- `Reactive/Core/Dynamic.lean` (new/newWithId, map/mapWithId, hold/holdWithId, etc.)
+- `Reactive/Combinators/Event.lean` (all combinators split)
+- `Reactive/Combinators/Dynamic.lean` (all combinators split)
+- `Reactive/Combinators/Switch.lean` (all combinators split)
+- `Reactive/Host/Spider.lean` (timelineCtx in SpiderEnv)
+
 ---
 
 ## Feature Proposals
@@ -353,21 +380,9 @@ Fixed `Event.mergeList` to properly batch simultaneous events into a single list
 
 ---
 
-### [Priority: Medium] Type-Safe Timeline Separation
+### [DONE] Type-Safe Timeline Separation
 
-**Current State:** Timeline is a phantom type parameter, but nothing prevents mixing events from different timelines at runtime.
-
-**Proposed Change:** Add compile-time enforcement that prevents mixing `Event Spider a` with `Event OtherTimeline a` in combinators. Consider using dependent types or more refined type constraints.
-
-**Benefits:**
-- Catch timeline mixing errors at compile time
-- Better guarantees for multi-timeline scenarios
-
-**Affected Files:**
-- `/Users/Shared/Projects/lean-workspace/data/reactive/Reactive/Core/Types.lean`
-- All files that use timeline parameters
-
-**Estimated Effort:** Medium
+Implemented. See "Type-Safe Timeline Separation" in Recently Completed section.
 
 ---
 

@@ -7,10 +7,10 @@ import Reactive.Core
 
 namespace Reactive
 
-/-- Switch using a Dynamic of events.
+/-- Switch using a Dynamic of events (with explicit NodeId).
     Uses the Dynamic's change event to know when to switch. -/
-def switchDyn [Timeline t] (de : Dynamic t (Event t a)) (nodeId : NodeId) : IO (Event t a) := do
-  let derived ← Event.newNode nodeId ⟨0⟩
+def switchDynWithId [Timeline t] (de : Dynamic t (Event t a)) (nodeId : NodeId) : IO (Event t a) := do
+  let derived ← Event.newNodeWithId nodeId ⟨0⟩
   let currentUnsubRef ← IO.mkRef (pure () : IO Unit)
 
   -- Subscribe to the initial event
@@ -29,21 +29,28 @@ def switchDyn [Timeline t] (de : Dynamic t (Event t a)) (nodeId : NodeId) : IO (
 
   pure derived
 
+/-- Switch using a Dynamic of events.
+    Uses the Dynamic's change event to know when to switch.
+    Requires TimelineCtx for type-safe timeline separation. -/
+def switchDyn [Timeline t] (ctx : TimelineCtx t) (de : Dynamic t (Event t a)) : IO (Event t a) := do
+  let nodeId ← ctx.freshNodeId
+  switchDynWithId de nodeId
+
 /-- Switch behaviors - sample from whichever behavior the outer behavior currently holds -/
 def switchBehavior (bb : Behavior t (Behavior t a)) : Behavior t a :=
   Behavior.fromSample do
     let inner ← bb.sample
     inner.sample
 
-/-- Switch dynamics - like switchBehavior but preserves change events.
+/-- Switch dynamics (with explicit NodeId) - like switchBehavior but preserves change events.
     The result dynamic updates whenever:
     1. The outer dynamic changes to a new inner dynamic
     2. The current inner dynamic's value changes -/
-def switchDynamic [Timeline t] (dd : Dynamic t (Dynamic t a)) (nodeId : NodeId)
+def switchDynamicWithId [Timeline t] (dd : Dynamic t (Dynamic t a)) (nodeId : NodeId)
     : IO (Dynamic t a) := do
   let initialInner ← dd.sample
   let initialValue ← initialInner.sample
-  let (result, updateResult) ← Dynamic.new initialValue nodeId
+  let (result, updateResult) ← Dynamic.newWithId initialValue nodeId
   let currentUnsubRef ← IO.mkRef (pure () : IO Unit)
 
   -- Helper to subscribe to an inner dynamic
@@ -68,10 +75,19 @@ def switchDynamic [Timeline t] (dd : Dynamic t (Dynamic t a)) (nodeId : NodeId)
 
   pure result
 
-/-- Hold an event, switching to newer events as they arrive -/
-def switchHold [Timeline t] (initial : Event t a) (updates : Event t (Event t a))
+/-- Switch dynamics - like switchBehavior but preserves change events.
+    The result dynamic updates whenever:
+    1. The outer dynamic changes to a new inner dynamic
+    2. The current inner dynamic's value changes
+    Requires TimelineCtx for type-safe timeline separation. -/
+def switchDynamic [Timeline t] (ctx : TimelineCtx t) (dd : Dynamic t (Dynamic t a)) : IO (Dynamic t a) := do
+  let nodeId ← ctx.freshNodeId
+  switchDynamicWithId dd nodeId
+
+/-- Hold an event, switching to newer events as they arrive (with explicit NodeId). -/
+def switchHoldWithId [Timeline t] (initial : Event t a) (updates : Event t (Event t a))
     (nodeId : NodeId) : IO (Event t a) := do
-  let derived ← Event.newNode nodeId ⟨0⟩
+  let derived ← Event.newNodeWithId nodeId ⟨0⟩
   let currentUnsubRef ← IO.mkRef (pure () : IO Unit)
 
   -- Subscribe to initial
@@ -86,5 +102,11 @@ def switchHold [Timeline t] (initial : Event t a) (updates : Event t (Event t a)
     currentUnsubRef.set unsub
 
   pure derived
+
+/-- Hold an event, switching to newer events as they arrive.
+    Requires TimelineCtx for type-safe timeline separation. -/
+def switchHold [Timeline t] (ctx : TimelineCtx t) (initial : Event t a) (updates : Event t (Event t a)) : IO (Event t a) := do
+  let nodeId ← ctx.freshNodeId
+  switchHoldWithId initial updates nodeId
 
 end Reactive

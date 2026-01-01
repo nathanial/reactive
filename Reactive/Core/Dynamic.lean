@@ -43,37 +43,56 @@ def updated (d : Dynamic t a) : Event t a :=
 def sample (d : Dynamic t a) : IO a :=
   d.valueRef.get
 
-/-- Create a new Dynamic with an initial value.
+/-- Create a new Dynamic with an initial value (with explicit NodeId).
     Returns the Dynamic and a function to update its value. -/
-def new [Timeline t] (initial : a) (nodeId : NodeId) : IO (Dynamic t a × (a → IO Unit)) := do
+def newWithId [Timeline t] (initial : a) (nodeId : NodeId) : IO (Dynamic t a × (a → IO Unit)) := do
   let valueRef ← IO.mkRef initial
-  let (changeEvent, trigger) ← Event.newTrigger nodeId
+  let (changeEvent, trigger) ← Event.newTriggerWithId nodeId
   let update := fun newValue => do
     valueRef.set newValue
     trigger newValue
   pure (⟨valueRef, changeEvent, trigger⟩, update)
 
-/-- Create a constant Dynamic that never changes -/
-def constant [Timeline t] (x : a) : IO (Dynamic t a) := do
+/-- Create a new Dynamic with an initial value.
+    Returns the Dynamic and a function to update its value.
+    Requires TimelineCtx for type-safe timeline separation. -/
+def new [Timeline t] (ctx : TimelineCtx t) (initial : a) : IO (Dynamic t a × (a → IO Unit)) := do
+  let nodeId ← ctx.freshNodeId
+  newWithId initial nodeId
+
+/-- Create a constant Dynamic that never changes (with explicit NodeId). -/
+def constantWithId [Timeline t] (x : a) (nodeId : NodeId) : IO (Dynamic t a) := do
   let valueRef ← IO.mkRef x
-  let neverEvent ← Event.never (t := t)
+  let neverEvent ← Event.newNodeWithId (t := t) nodeId
   pure ⟨valueRef, neverEvent, fun _ => pure ()⟩
 
-/-- Map a function over a Dynamic's values -/
-def map [Timeline t] (f : a → b) (da : Dynamic t a) (nodeId : NodeId) : IO (Dynamic t b) := do
+/-- Create a constant Dynamic that never changes.
+    Requires TimelineCtx for type-safe timeline separation. -/
+def constant [Timeline t] (ctx : TimelineCtx t) (x : a) : IO (Dynamic t a) := do
+  let nodeId ← ctx.freshNodeId
+  constantWithId x nodeId
+
+/-- Map a function over a Dynamic's values (with explicit NodeId). -/
+def mapWithId [Timeline t] (f : a → b) (da : Dynamic t a) (nodeId : NodeId) : IO (Dynamic t b) := do
   let initial ← da.sample
   let valueRef ← IO.mkRef (f initial)
-  let mappedEvent ← Event.map f da.changeEvent nodeId
+  let mappedEvent ← Event.mapWithId f da.changeEvent nodeId
   let _ ← mappedEvent.subscribe fun b => valueRef.set b
   pure ⟨valueRef, mappedEvent, fun _ => pure ()⟩
 
-/-- Combine two Dynamics with a function -/
-def zipWith [Timeline t] (f : a → b → c) (da : Dynamic t a) (db : Dynamic t b)
+/-- Map a function over a Dynamic's values.
+    Requires TimelineCtx for type-safe timeline separation. -/
+def map [Timeline t] (ctx : TimelineCtx t) (f : a → b) (da : Dynamic t a) : IO (Dynamic t b) := do
+  let nodeId ← ctx.freshNodeId
+  mapWithId f da nodeId
+
+/-- Combine two Dynamics with a function (with explicit NodeId). -/
+def zipWithId [Timeline t] (f : a → b → c) (da : Dynamic t a) (db : Dynamic t b)
     (nodeId : NodeId) : IO (Dynamic t c) := do
   let a ← da.sample
   let b ← db.sample
   let valueRef ← IO.mkRef (f a b)
-  let (changeEvent, trigger) ← Event.newTrigger nodeId
+  let (changeEvent, trigger) ← Event.newTriggerWithId nodeId
 
   -- Subscribe to changes in da
   let _ ← da.changeEvent.subscribe fun newA => do
@@ -91,30 +110,53 @@ def zipWith [Timeline t] (f : a → b → c) (da : Dynamic t a) (db : Dynamic t 
 
   pure ⟨valueRef, changeEvent, trigger⟩
 
-/-- Pair two Dynamics -/
-def zip [Timeline t] (da : Dynamic t a) (db : Dynamic t b) (nodeId : NodeId) : IO (Dynamic t (a × b)) :=
-  zipWith Prod.mk da db nodeId
+/-- Combine two Dynamics with a function.
+    Requires TimelineCtx for type-safe timeline separation. -/
+def zipWith [Timeline t] (ctx : TimelineCtx t) (f : a → b → c) (da : Dynamic t a) (db : Dynamic t b) : IO (Dynamic t c) := do
+  let nodeId ← ctx.freshNodeId
+  zipWithId f da db nodeId
 
-/-- Create a Dynamic that holds the most recent value from an Event -/
-def hold [Timeline t] (initial : a) (event : Event t a) (nodeId : NodeId) : IO (Dynamic t a) := do
+/-- Pair two Dynamics (with explicit NodeId). -/
+def zipId [Timeline t] (da : Dynamic t a) (db : Dynamic t b) (nodeId : NodeId) : IO (Dynamic t (a × b)) :=
+  zipWithId Prod.mk da db nodeId
+
+/-- Pair two Dynamics.
+    Requires TimelineCtx for type-safe timeline separation. -/
+def zip [Timeline t] (ctx : TimelineCtx t) (da : Dynamic t a) (db : Dynamic t b) : IO (Dynamic t (a × b)) :=
+  zipWith ctx Prod.mk da db
+
+/-- Create a Dynamic that holds the most recent value from an Event (with explicit NodeId). -/
+def holdWithId [Timeline t] (initial : a) (event : Event t a) (nodeId : NodeId) : IO (Dynamic t a) := do
   let valueRef ← IO.mkRef initial
-  let (changeEvent, trigger) ← Event.newTrigger nodeId
+  let (changeEvent, trigger) ← Event.newTriggerWithId nodeId
   let _ ← event.subscribe fun a => do
     valueRef.set a
     trigger a
   pure ⟨valueRef, changeEvent, trigger⟩
 
-/-- Fold over event occurrences to create a Dynamic -/
-def foldDyn [Timeline t] (f : a → b → b) (initial : b) (event : Event t a)
+/-- Create a Dynamic that holds the most recent value from an Event.
+    Requires TimelineCtx for type-safe timeline separation. -/
+def hold [Timeline t] (ctx : TimelineCtx t) (initial : a) (event : Event t a) : IO (Dynamic t a) := do
+  let nodeId ← ctx.freshNodeId
+  holdWithId initial event nodeId
+
+/-- Fold over event occurrences to create a Dynamic (with explicit NodeId). -/
+def foldDynWithId [Timeline t] (f : a → b → b) (initial : b) (event : Event t a)
     (nodeId : NodeId) : IO (Dynamic t b) := do
   let valueRef ← IO.mkRef initial
-  let (changeEvent, trigger) ← Event.newTrigger nodeId
+  let (changeEvent, trigger) ← Event.newTriggerWithId nodeId
   let _ ← event.subscribe fun a => do
     let old ← valueRef.get
     let new := f a old
     valueRef.set new
     trigger new
   pure ⟨valueRef, changeEvent, trigger⟩
+
+/-- Fold over event occurrences to create a Dynamic.
+    Requires TimelineCtx for type-safe timeline separation. -/
+def foldDyn [Timeline t] (ctx : TimelineCtx t) (f : a → b → b) (initial : b) (event : Event t a) : IO (Dynamic t b) := do
+  let nodeId ← ctx.freshNodeId
+  foldDynWithId f initial event nodeId
 
 end Dynamic
 

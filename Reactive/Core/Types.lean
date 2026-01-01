@@ -21,6 +21,32 @@ structure NodeId where
   id : Nat
   deriving BEq, Hashable, Repr, Inhabited, Ord
 
+/-- Evidence of operating within a specific timeline's host context.
+
+    This type enforces type-safe timeline separation: you can only create events
+    on a timeline if you have the corresponding `TimelineCtx`. The host monad
+    (e.g., SpiderM) provides this context, preventing accidental creation of
+    events outside the proper infrastructure.
+
+    The private constructor ensures only the host implementation can create contexts. -/
+structure TimelineCtx (t : Type) [Timeline t] where
+  private mk ::
+  /-- Node ID generator for this context -/
+  nodeIdGen : IO.Ref Nat
+
+namespace TimelineCtx
+
+/-- Create a new timeline context. Internal use only - called by host implementations. -/
+protected def new [Timeline t] : IO (TimelineCtx t) := do
+  let gen ← IO.mkRef 0
+  pure ⟨gen⟩
+
+/-- Generate a fresh NodeId within this context -/
+def freshNodeId [Timeline t] (ctx : TimelineCtx t) : IO NodeId := do
+  ctx.nodeIdGen.modifyGet fun n => (NodeId.mk n, n + 1)
+
+end TimelineCtx
+
 /-- Height in the dependency graph for topological ordering.
     Higher nodes depend on lower nodes. Processing in height order prevents glitches.
 

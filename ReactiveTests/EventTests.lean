@@ -33,7 +33,7 @@ test "Event.map transforms values" := do
     let event := pair.1
     let trigger := pair.2
     let nodeId ← SpiderM.freshNodeId
-    let mappedEvent ← liftM (m := IO) <| Event.map (· * 2) event nodeId
+    let mappedEvent ← liftM (m := IO) <| Event.mapWithId (· * 2) event nodeId
 
     let receivedRef ← liftM (m := IO) <| IO.mkRef ([] : List Nat)
     let _ ← liftM (m := IO) <| mappedEvent.subscribe fun n =>
@@ -53,7 +53,7 @@ test "Event.filter removes non-matching values" := do
     let event := pair.1
     let trigger := pair.2
     let nodeId ← SpiderM.freshNodeId
-    let filteredEvent ← liftM (m := IO) <| Event.filter (· > 2) event nodeId
+    let filteredEvent ← liftM (m := IO) <| Event.filterWithId (· > 2) event nodeId
 
     let receivedRef ← liftM (m := IO) <| IO.mkRef ([] : List Nat)
     let _ ← liftM (m := IO) <| filteredEvent.subscribe fun n =>
@@ -77,7 +77,7 @@ test "Event.merge combines events" := do
     let event2 := pair2.1
     let trigger2 := pair2.2
     let nodeId ← SpiderM.freshNodeId
-    let mergedEvent ← liftM (m := IO) <| Event.merge event1 event2 nodeId
+    let mergedEvent ← liftM (m := IO) <| Event.mergeWithId event1 event2 nodeId
 
     let receivedRef ← liftM (m := IO) <| IO.mkRef ([] : List Nat)
     let _ ← liftM (m := IO) <| mergedEvent.subscribe fun n =>

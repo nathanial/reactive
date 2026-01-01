@@ -20,8 +20,8 @@ instance : Timeline Spider where
 
 /-- Environment for the Spider monad -/
 structure SpiderEnv where
-  /-- Counter for generating unique node IDs -/
-  nextNodeId : IO.Ref Nat
+  /-- Timeline context for type-safe event creation -/
+  timelineCtx : TimelineCtx Spider
   /-- Actions to run after the network is fully built -/
   postBuildActions : IO.Ref (Array (IO Unit))
   /-- The post-build event (fires once after construction) -/
@@ -37,14 +37,14 @@ namespace SpiderEnv
 
 /-- Create a new Spider environment -/
 def new : IO SpiderEnv := do
-  let nextNodeId ← IO.mkRef 1  -- Start at 1, reserve 0 for special use
+  let timelineCtx ← TimelineCtx.new
   let postBuildActions ← IO.mkRef #[]
-  let (postBuildEvent, postBuildTrigger) ← Event.newTrigger ⟨0⟩
+  let (postBuildEvent, postBuildTrigger) ← Event.newTriggerWithId ⟨0⟩
   let propagationQueue ← IO.mkRef {}
   let currentScope ← SubscriptionScope.new
   -- Set global propagation context for frame-based firing
   setPropagationContext propagationQueue
-  pure { nextNodeId, postBuildActions, postBuildEvent, postBuildTrigger, propagationQueue, currentScope }
+  pure { timelineCtx, postBuildActions, postBuildEvent, postBuildTrigger, propagationQueue, currentScope }
 
 /-- Process all pending fires in height order until queue is empty.
     When current frame is empty, processes nextFramePending in a new sub-frame. -/
@@ -109,7 +109,11 @@ def runFresh (m : SpiderM a) : IO a := do
 
 /-- Get a fresh node ID -/
 def freshNodeId : SpiderM NodeId := ⟨fun env => do
-  env.nextNodeId.modifyGet fun n => (⟨n⟩, n + 1)⟩
+  env.timelineCtx.freshNodeId⟩
+
+/-- Get the timeline context. Useful for calling IO-based functions that require TimelineCtx. -/
+def getTimelineCtx : SpiderM (TimelineCtx Spider) :=
+  ⟨fun env => pure env.timelineCtx⟩
 
 /-- Register a post-build action -/
 def registerPostBuild (action : IO Unit) : SpiderM Unit := ⟨fun env => do
@@ -151,12 +155,8 @@ def withAutoDisposeScope (action : SpiderM a) : SpiderM a :=
 instance : MonadSample Spider SpiderM where
   sample b := ⟨fun _ => b.sample⟩
 
-private def nextNodeIdIO (env : SpiderEnv) : IO NodeId := do
-  env.nextNodeId.modifyGet fun n => (NodeId.mk n, n + 1)
-
 instance : MonadHold Spider SpiderM where
   hold initial event := ⟨fun env => do
-    let _nodeId ← nextNodeIdIO env
     -- Create a behavior that holds the latest value
     let valueRef ← IO.mkRef initial
     let unsub ← event.subscribe fun a => valueRef.set a
@@ -164,15 +164,13 @@ instance : MonadHold Spider SpiderM where
     pure (Behavior.fromSample valueRef.get)⟩
 
   holdDyn initial event := ⟨fun env => do
-    let nodeId ← nextNodeIdIO env
-    let (dyn, update) ← Dynamic.new initial nodeId
+    let (dyn, update) ← Dynamic.new env.timelineCtx initial
     let unsub ← event.subscribe fun a => update a
     env.currentScope.register unsub
     pure dyn⟩
 
   foldDyn f initial event := ⟨fun env => do
-    let nodeId ← nextNodeIdIO env
-    let (dyn, update) ← Dynamic.new initial nodeId
+    let (dyn, update) ← Dynamic.new env.timelineCtx initial
     let unsub ← event.subscribe fun a => do
       let old ← dyn.sample
       update (f a old)
@@ -180,9 +178,8 @@ instance : MonadHold Spider SpiderM where
     pure dyn⟩
 
   foldDynM f initial event := ⟨fun env => do
-    let nodeId ← nextNodeIdIO env
     -- For monadic fold, we create a dynamic and update it with each event
-    let (dyn, update) ← Dynamic.new initial nodeId
+    let (dyn, update) ← Dynamic.new env.timelineCtx initial
     let unsub ← event.subscribe fun a => do
       let old ← dyn.sample
       -- Run the SpiderM action to get the new value
@@ -194,15 +191,13 @@ instance : MonadHold Spider SpiderM where
 
 instance : TriggerEvent Spider SpiderM where
   newTriggerEvent := ⟨fun env => do
-    let nodeId ← nextNodeIdIO env
-    let (event, rawTrigger) ← Event.newTrigger nodeId
+    let (event, rawTrigger) ← Event.newTrigger env.timelineCtx
     -- Wrap trigger to use frame semantics for glitch-free propagation
     let framedTrigger := fun a => env.withFrame (rawTrigger a)
     pure (event, framedTrigger)⟩
 
   newEventWithTrigger setup := ⟨fun env => do
-    let nodeId ← nextNodeIdIO env
-    let (event, rawTrigger) ← Event.newTrigger nodeId
+    let (event, rawTrigger) ← Event.newTrigger env.timelineCtx
     -- Wrap trigger to use frame semantics
     let framedTrigger := fun a => env.withFrame (rawTrigger a)
     setup framedTrigger
@@ -217,8 +212,7 @@ instance : Adjustable Spider SpiderM where
     let initialResult ← initial.run env
 
     -- Create result event for replacement outputs
-    let resultNodeId ← nextNodeIdIO env
-    let (resultEvent, fireResult) ← Event.newTrigger resultNodeId
+    let (resultEvent, fireResult) ← Event.newTrigger env.timelineCtx
 
     -- Subscribe to replacement events - when fired, run the new computation
     let unsub ← replaceEvent.subscribe fun replacementM => do
@@ -235,7 +229,7 @@ instance : Adjustable Spider SpiderM where
 
     -- For a minimal implementation, return a never-firing update event
     -- A full implementation would track per-item replacement events
-    let neverEvent ← Event.never (t := Spider)
+    let neverEvent ← Event.never env.timelineCtx
     pure (results, neverEvent)
   ⟩
 
@@ -245,8 +239,7 @@ instance : Adjustable Spider SpiderM where
 def runWithReplaceM (initial : SpiderM a) (replaceEvent : Event Spider (SpiderM a))
     : SpiderM (a × Event Spider a) := ⟨fun env => do
   let initialResult ← initial.run env
-  let resultNodeId ← nextNodeIdIO env
-  let (resultEvent, fireResult) ← Event.newTrigger resultNodeId
+  let (resultEvent, fireResult) ← Event.newTrigger env.timelineCtx
   let unsub ← replaceEvent.subscribe fun replacementM => do
     let result ← replacementM.run env
     fireResult result
@@ -259,7 +252,7 @@ def runWithReplaceM (initial : SpiderM a) (replaceEvent : Event Spider (SpiderM 
 def traverseWithAdjustM (f : a → SpiderM b) (inputs : List a)
     : SpiderM (List b × Event Spider (List b)) := ⟨fun env => do
   let results ← inputs.mapM fun x => (f x).run env
-  let neverEvent ← Event.never (t := Spider)
+  let neverEvent ← Event.never env.timelineCtx
   pure (results, neverEvent)
 ⟩
 
@@ -278,9 +271,9 @@ namespace Dynamic
 
 /-- Map a function over a Dynamic, auto-allocating NodeId and registering with scope. -/
 def mapM (f : a → b) (da : Dynamic Spider a) : SpiderM (Dynamic Spider b) := ⟨fun env => do
-  let nodeId ← env.nextNodeId.modifyGet fun n => (NodeId.mk n, n + 1)
+  let nodeId ← env.timelineCtx.freshNodeId
   -- Use existing IO-based map (which creates its own internal subscription)
-  let result ← Dynamic.map f da nodeId
+  let result ← Dynamic.mapWithId f da nodeId
   -- Register a subscription to the source's updated event
   -- This tracks the subscription for cleanup
   let unsub ← da.updated.subscribe fun _ => pure ()
@@ -290,9 +283,9 @@ def mapM (f : a → b) (da : Dynamic Spider a) : SpiderM (Dynamic Spider b) := �
 /-- Combine two Dynamics with a function, auto-allocating NodeId and registering with scope. -/
 def zipWithM (f : a → b → c) (da : Dynamic Spider a) (db : Dynamic Spider b)
     : SpiderM (Dynamic Spider c) := ⟨fun env => do
-  let nodeId ← env.nextNodeId.modifyGet fun n => (NodeId.mk n, n + 1)
+  let nodeId ← env.timelineCtx.freshNodeId
   -- Use existing IO-based zipWith
-  let result ← Dynamic.zipWith f da db nodeId
+  let result ← Dynamic.zipWithId f da db nodeId
   -- Register subscriptions to track both sources
   let unsub1 ← da.updated.subscribe fun _ => pure ()
   let unsub2 ← db.updated.subscribe fun _ => pure ()
@@ -309,9 +302,9 @@ def zipWith3M (f : a → b → c → d)
   Dynamic.zipWithM (fun (a, b) c => f a b c) ab dc
 
 /-- Create a constant Dynamic that never changes.
-    Note: No NodeId or subscription needed since constant dynamics use Event.never. -/
-def pureM (x : a) : SpiderM (Dynamic Spider a) :=
-  SpiderM.liftIO <| Dynamic.constant x
+    Uses TimelineCtx for type-safe event creation. -/
+def pureM (x : a) : SpiderM (Dynamic Spider a) := ⟨fun env => do
+  Dynamic.constant env.timelineCtx x⟩
 
 /-- Applicative apply for Dynamics, auto-allocating NodeId and registering with scope. -/
 def apM (df : Dynamic Spider (a → b)) (da : Dynamic Spider a)
@@ -364,16 +357,16 @@ def subscribeM (e : Event Spider a) (callback : Subscriber a) : SpiderM (IO Unit
 
 /-- Map a function over an Event, auto-allocating NodeId and registering with scope. -/
 def mapM (f : a → b) (e : Event Spider a) : SpiderM (Event Spider b) := ⟨fun env => do
-  let nodeId ← env.nextNodeId.modifyGet fun n => (NodeId.mk n, n + 1)
-  let derived ← Event.newNode nodeId (e.height.inc)
+  let nodeId ← env.timelineCtx.freshNodeId
+  let derived ← Event.newNodeWithId nodeId (e.height.inc)
   let unsub ← e.subscribe fun a => derived.fire (f a)
   env.currentScope.register unsub
   pure derived⟩
 
 /-- Filter an Event by a predicate, auto-allocating NodeId and registering with scope. -/
 def filterM (p : a → Bool) (e : Event Spider a) : SpiderM (Event Spider a) := ⟨fun env => do
-  let nodeId ← env.nextNodeId.modifyGet fun n => (NodeId.mk n, n + 1)
-  let derived ← Event.newNode nodeId (e.height.inc)
+  let nodeId ← env.timelineCtx.freshNodeId
+  let derived ← Event.newNodeWithId nodeId (e.height.inc)
   let unsub ← e.subscribe fun a =>
     if p a then derived.fire a else pure ()
   env.currentScope.register unsub
@@ -381,8 +374,8 @@ def filterM (p : a → Bool) (e : Event Spider a) : SpiderM (Event Spider a) := 
 
 /-- Filter and map an Event, auto-allocating NodeId and registering with scope. -/
 def mapMaybeM (f : a → Option b) (e : Event Spider a) : SpiderM (Event Spider b) := ⟨fun env => do
-  let nodeId ← env.nextNodeId.modifyGet fun n => (NodeId.mk n, n + 1)
-  let derived ← Event.newNode nodeId (e.height.inc)
+  let nodeId ← env.timelineCtx.freshNodeId
+  let derived ← Event.newNodeWithId nodeId (e.height.inc)
   let unsub ← e.subscribe fun a =>
     match f a with
     | some b => derived.fire b
@@ -392,9 +385,9 @@ def mapMaybeM (f : a → Option b) (e : Event Spider a) : SpiderM (Event Spider 
 
 /-- Merge two Events, auto-allocating NodeId and registering with scope. -/
 def mergeM (e1 : Event Spider a) (e2 : Event Spider a) : SpiderM (Event Spider a) := ⟨fun env => do
-  let nodeId ← env.nextNodeId.modifyGet fun n => (NodeId.mk n, n + 1)
+  let nodeId ← env.timelineCtx.freshNodeId
   let height := Height.inc (max e1.height e2.height)
-  let derived ← Event.newNode nodeId height
+  let derived ← Event.newNodeWithId nodeId height
   let unsub1 ← e1.subscribe derived.fire
   let unsub2 ← e2.subscribe derived.fire
   env.currentScope.register unsub1
@@ -403,8 +396,8 @@ def mergeM (e1 : Event Spider a) (e2 : Event Spider a) : SpiderM (Event Spider a
 
 /-- Tag an Event with a Behavior's current value, auto-allocating NodeId and registering with scope. -/
 def tagM (beh : Behavior Spider a) (e : Event Spider b) : SpiderM (Event Spider a) := ⟨fun env => do
-  let nodeId ← env.nextNodeId.modifyGet fun n => (NodeId.mk n, n + 1)
-  let derived ← Event.newNode nodeId (e.height.inc)
+  let nodeId ← env.timelineCtx.freshNodeId
+  let derived ← Event.newNodeWithId nodeId (e.height.inc)
   let unsub ← e.subscribe fun _ => do
     let v ← beh.sample
     derived.fire v
@@ -413,8 +406,8 @@ def tagM (beh : Behavior Spider a) (e : Event Spider b) : SpiderM (Event Spider 
 
 /-- Attach a Behavior's value to an Event, auto-allocating NodeId and registering with scope. -/
 def attachM (b : Behavior Spider a) (e : Event Spider c) : SpiderM (Event Spider (a × c)) := ⟨fun env => do
-  let nodeId ← env.nextNodeId.modifyGet fun n => (NodeId.mk n, n + 1)
-  let derived ← Event.newNode nodeId (e.height.inc)
+  let nodeId ← env.timelineCtx.freshNodeId
+  let derived ← Event.newNodeWithId nodeId (e.height.inc)
   let unsub ← e.subscribe fun c => do
     let a ← b.sample
     derived.fire (a, c)
@@ -424,8 +417,8 @@ def attachM (b : Behavior Spider a) (e : Event Spider c) : SpiderM (Event Spider
 /-- Attach with a combining function, auto-allocating NodeId and registering with scope. -/
 def attachWithM (f : a → c → d) (b : Behavior Spider a) (e : Event Spider c)
     : SpiderM (Event Spider d) := ⟨fun env => do
-  let nodeId ← env.nextNodeId.modifyGet fun n => (NodeId.mk n, n + 1)
-  let derived ← Event.newNode nodeId (e.height.inc)
+  let nodeId ← env.timelineCtx.freshNodeId
+  let derived ← Event.newNodeWithId nodeId (e.height.inc)
   let unsub ← e.subscribe fun c => do
     let a ← b.sample
     derived.fire (f a c)
@@ -434,8 +427,8 @@ def attachWithM (f : a → c → d) (b : Behavior Spider a) (e : Event Spider c)
 
 /-- Gate an Event by a Boolean Behavior, auto-allocating NodeId and registering with scope. -/
 def gateM (beh : Behavior Spider Bool) (e : Event Spider a) : SpiderM (Event Spider a) := ⟨fun env => do
-  let nodeId ← env.nextNodeId.modifyGet fun n => (NodeId.mk n, n + 1)
-  let derived ← Event.newNode nodeId (e.height.inc)
+  let nodeId ← env.timelineCtx.freshNodeId
+  let derived ← Event.newNodeWithId nodeId (e.height.inc)
   let unsub ← e.subscribe fun a => do
     let isOpen ← beh.sample
     if isOpen then derived.fire a else pure ()
@@ -444,9 +437,9 @@ def gateM (beh : Behavior Spider Bool) (e : Event Spider a) : SpiderM (Event Spi
 
 /-- Merge a list of Events into a list Event, auto-allocating NodeId and registering with scope. -/
 def mergeListM (events : List (Event Spider a)) : SpiderM (Event Spider (List a)) := ⟨fun env => do
-  let nodeId ← env.nextNodeId.modifyGet fun n => (NodeId.mk n, n + 1)
+  let nodeId ← env.timelineCtx.freshNodeId
   let maxHeight := events.foldl (fun h e => max h e.height) ⟨0⟩
-  let derived ← Event.newNode nodeId (maxHeight.inc)
+  let derived ← Event.newNodeWithId nodeId (maxHeight.inc)
   let bufferRef ← IO.mkRef ([] : List a)
   let flushScheduledRef ← IO.mkRef false
 
@@ -474,9 +467,9 @@ def mergeListM (events : List (Event Spider a)) : SpiderM (Event Spider (List a)
 
 /-- Take the leftmost firing Event from a list, auto-allocating NodeId and registering with scope. -/
 def leftmostM (events : List (Event Spider a)) : SpiderM (Event Spider a) := ⟨fun env => do
-  let nodeId ← env.nextNodeId.modifyGet fun n => (NodeId.mk n, n + 1)
+  let nodeId ← env.timelineCtx.freshNodeId
   let maxHeight := events.foldl (fun h e => max h e.height) ⟨0⟩
-  let derived ← Event.newNode nodeId (maxHeight.inc)
+  let derived ← Event.newNodeWithId nodeId (maxHeight.inc)
   for e in events do
     let unsub ← e.subscribe derived.fire
     env.currentScope.register unsub
@@ -484,10 +477,10 @@ def leftmostM (events : List (Event Spider a)) : SpiderM (Event Spider a) := ⟨
 
 /-- Fan out a Sum Event into two Events, auto-allocating NodeIds and registering with scope. -/
 def fanEitherM (e : Event Spider (Sum a b)) : SpiderM (Event Spider a × Event Spider b) := ⟨fun env => do
-  let nodeIdL ← env.nextNodeId.modifyGet fun n => (NodeId.mk n, n + 1)
-  let nodeIdR ← env.nextNodeId.modifyGet fun n => (NodeId.mk n, n + 1)
-  let leftEvent ← Event.newNode nodeIdL (e.height.inc)
-  let rightEvent ← Event.newNode nodeIdR (e.height.inc)
+  let nodeIdL ← env.timelineCtx.freshNodeId
+  let nodeIdR ← env.timelineCtx.freshNodeId
+  let leftEvent ← Event.newNodeWithId nodeIdL (e.height.inc)
+  let rightEvent ← Event.newNodeWithId nodeIdR (e.height.inc)
   let unsub ← e.subscribe fun ab =>
     match ab with
     | .inl a => leftEvent.fire a
@@ -498,8 +491,8 @@ def fanEitherM (e : Event Spider (Sum a b)) : SpiderM (Event Spider a × Event S
 /-- Delay an Event by one propagation frame, auto-allocating NodeId and registering with scope.
     Useful for breaking dependency cycles. -/
 def delayFrameM (e : Event Spider a) : SpiderM (Event Spider a) := ⟨fun env => do
-  let nodeId ← env.nextNodeId.modifyGet fun n => (NodeId.mk n, n + 1)
-  let derived ← Event.newNode nodeId (e.height.inc)
+  let nodeId ← env.timelineCtx.freshNodeId
+  let derived ← Event.newNodeWithId nodeId (e.height.inc)
   let unsub ← e.subscribe fun a => do
     match ← getPropagationContext with
     | some queueRef =>
@@ -513,9 +506,9 @@ def delayFrameM (e : Event Spider a) : SpiderM (Event Spider a) := ⟨fun env =>
 
 /-- Take at most n occurrences from an Event, auto-allocating NodeId and registering with scope. -/
 def takeNM (n : Nat) (e : Event Spider a) : SpiderM (Event Spider a) := ⟨fun env => do
-  let nodeId ← env.nextNodeId.modifyGet fun n => (NodeId.mk n, n + 1)
+  let nodeId ← env.timelineCtx.freshNodeId
   let countRef ← IO.mkRef 0
-  let derived ← Event.newNode nodeId (e.height.inc)
+  let derived ← Event.newNodeWithId nodeId (e.height.inc)
   let unsub ← e.subscribe fun a => do
     let count ← countRef.get
     if count < n then
@@ -526,9 +519,9 @@ def takeNM (n : Nat) (e : Event Spider a) : SpiderM (Event Spider a) := ⟨fun e
 
 /-- Drop the first n occurrences from an Event, auto-allocating NodeId and registering with scope. -/
 def dropNM (n : Nat) (e : Event Spider a) : SpiderM (Event Spider a) := ⟨fun env => do
-  let nodeId ← env.nextNodeId.modifyGet fun n' => (NodeId.mk n', n' + 1)
+  let nodeId ← env.timelineCtx.freshNodeId
   let countRef ← IO.mkRef 0
-  let derived ← Event.newNode nodeId (e.height.inc)
+  let derived ← Event.newNodeWithId nodeId (e.height.inc)
   let unsub ← e.subscribe fun a => do
     let count ← countRef.get
     countRef.set (count + 1)
@@ -540,9 +533,9 @@ def dropNM (n : Nat) (e : Event Spider a) : SpiderM (Event Spider a) := ⟨fun e
     Like foldDyn but returns an Event instead of a Dynamic. -/
 def accumulateM (f : a → b → b) (initial : b) (e : Event Spider a)
     : SpiderM (Event Spider b) := ⟨fun env => do
-  let nodeId ← env.nextNodeId.modifyGet fun n => (NodeId.mk n, n + 1)
+  let nodeId ← env.timelineCtx.freshNodeId
   let stateRef ← IO.mkRef initial
-  let derived ← Event.newNode nodeId (e.height.inc)
+  let derived ← Event.newNodeWithId nodeId (e.height.inc)
   let unsub ← e.subscribe fun a => do
     let old ← stateRef.get
     let new := f a old
@@ -571,8 +564,8 @@ namespace Event
     in a new propagation frame. Subscription is registered with current scope. -/
 def delayDurationM (d : Chronos.Duration) (e : Event Spider a) : SpiderM (Event Spider a) :=
   ⟨fun env => do
-    let nodeId ← env.nextNodeId.modifyGet fun n => (NodeId.mk n, n + 1)
-    let derived ← Event.newNode nodeId (e.height.inc)
+    let nodeId ← env.timelineCtx.freshNodeId
+    let derived ← Event.newNodeWithId nodeId (e.height.inc)
     let unsub ← e.subscribe fun a => do
       let _ ← IO.asTask (prio := .dedicated) do
         let ms := d.toMilliseconds.toNat
@@ -590,8 +583,8 @@ def delayDurationM (d : Chronos.Duration) (e : Event Spider a) : SpiderM (Event 
     Subscription is registered with current scope. -/
 def debounceM (d : Chronos.Duration) (e : Event Spider a) : SpiderM (Event Spider a) :=
   ⟨fun env => do
-    let nodeId ← env.nextNodeId.modifyGet fun n => (NodeId.mk n, n + 1)
-    let derived ← Event.newNode nodeId (e.height.inc)
+    let nodeId ← env.timelineCtx.freshNodeId
+    let derived ← Event.newNodeWithId nodeId (e.height.inc)
     let generationRef ← IO.mkRef (0 : Nat)
     let pendingValueRef ← IO.mkRef (none : Option a)
 
@@ -621,8 +614,8 @@ def debounceM (d : Chronos.Duration) (e : Event Spider a) : SpiderM (Event Spide
 def throttleM (d : Chronos.Duration) (e : Event Spider a)
     (leading : Bool := true) (trailing : Bool := true) : SpiderM (Event Spider a) :=
   ⟨fun env => do
-    let nodeId ← env.nextNodeId.modifyGet fun n => (NodeId.mk n, n + 1)
-    let derived ← Event.newNode nodeId (e.height.inc)
+    let nodeId ← env.timelineCtx.freshNodeId
+    let derived ← Event.newNodeWithId nodeId (e.height.inc)
     let lastFireTimeRef ← IO.mkRef (none : Option Nat)  -- milliseconds since start
     let trailingValueRef ← IO.mkRef (none : Option a)
     let trailingScheduledRef ← IO.mkRef false
@@ -672,8 +665,7 @@ Additional combinators for higher-order FRP patterns. -/
     Subscription is registered with current scope. -/
 def runWithReplaceRequester (computation : SpiderM (a × Event Spider (SpiderM a)))
     : SpiderM (a × Event Spider a) := ⟨fun env => do
-  let resultNodeId ← env.nextNodeId.modifyGet fun n => (NodeId.mk n, n + 1)
-  let (resultEvent, fireResult) ← Event.newTrigger resultNodeId
+  let (resultEvent, fireResult) ← Event.newTrigger env.timelineCtx
 
   -- Run the initial computation
   let (initialResult, selfReplaceEvent) ← computation.run env
@@ -700,8 +692,7 @@ def traverseDynList (f : a → SpiderM b) (dynList : Dynamic Spider (List a))
   let initialResults ← initialList.mapM fun a => (f a).run env
 
   -- Create result dynamic
-  let nodeId ← env.nextNodeId.modifyGet fun n => (NodeId.mk n, n + 1)
-  let (resultDyn, updateResult) ← Dynamic.new initialResults nodeId
+  let (resultDyn, updateResult) ← Dynamic.new env.timelineCtx initialResults
 
   -- Subscribe to list changes and rebuild results
   let unsub ← dynList.updated.subscribe fun newList => do
