@@ -120,7 +120,8 @@ def dropN [Timeline t] (n : Nat) (e : Event t a) (nodeId : NodeId) : IO (Event t
       derived.fire a
   pure derived
 
-/-- Accumulate a value over event occurrences -/
+/-- Accumulate a value over event occurrences.
+    Emits the new accumulated value on each event occurrence. -/
 def accumulate [Timeline t] (f : a → b → b) (initial : b) (e : Event t a)
     (nodeId : NodeId) : IO (Event t b) := do
   let stateRef ← IO.mkRef initial
@@ -131,6 +132,10 @@ def accumulate [Timeline t] (f : a → b → b) (initial : b) (e : Event t a)
     stateRef.set new
     derived.fire new
   pure derived
+
+/-- Alias for accumulate (familiar name from other FRP libraries).
+    Like foldDyn but returns an Event instead of a Dynamic. -/
+abbrev scan := @accumulate
 
 end Event
 

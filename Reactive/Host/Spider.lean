@@ -6,6 +6,7 @@
 -/
 import Reactive.Core
 import Reactive.Class
+import Reactive.Combinators
 
 namespace Reactive.Host
 
@@ -160,6 +161,98 @@ def apM (df : Dynamic Spider (a → b)) (da : Dynamic Spider a)
   Dynamic.zipWithM (fun f a => f a) df da
 
 end Dynamic
+
+/-! ## Event SpiderM Combinators
+
+These provide ergonomic versions of Event operations that auto-allocate NodeIds,
+enabling cleaner composition within the SpiderM monad. -/
+
+namespace Event
+
+/-- Map a function over an Event, auto-allocating NodeId. -/
+def mapM (f : a → b) (e : Event Spider a) : SpiderM (Event Spider b) := do
+  let nodeId ← SpiderM.freshNodeId
+  SpiderM.liftIO <| Event.map f e nodeId
+
+/-- Filter an Event by a predicate, auto-allocating NodeId. -/
+def filterM (p : a → Bool) (e : Event Spider a) : SpiderM (Event Spider a) := do
+  let nodeId ← SpiderM.freshNodeId
+  SpiderM.liftIO <| Event.filter p e nodeId
+
+/-- Filter and map an Event, auto-allocating NodeId. -/
+def mapMaybeM (f : a → Option b) (e : Event Spider a) : SpiderM (Event Spider b) := do
+  let nodeId ← SpiderM.freshNodeId
+  SpiderM.liftIO <| Event.mapMaybe f e nodeId
+
+/-- Merge two Events, auto-allocating NodeId. -/
+def mergeM (e1 : Event Spider a) (e2 : Event Spider a) : SpiderM (Event Spider a) := do
+  let nodeId ← SpiderM.freshNodeId
+  SpiderM.liftIO <| Event.merge e1 e2 nodeId
+
+/-- Tag an Event with a Behavior's current value, auto-allocating NodeId. -/
+def tagM (beh : Behavior Spider a) (e : Event Spider b) : SpiderM (Event Spider a) := do
+  let nodeId ← SpiderM.freshNodeId
+  SpiderM.liftIO <| Event.tag beh e nodeId
+
+/-- Attach a Behavior's value to an Event, auto-allocating NodeId. -/
+def attachM (b : Behavior Spider a) (e : Event Spider c) : SpiderM (Event Spider (a × c)) := do
+  let nodeId ← SpiderM.freshNodeId
+  SpiderM.liftIO <| Event.attach b e nodeId
+
+/-- Attach with a combining function, auto-allocating NodeId. -/
+def attachWithM (f : a → c → d) (b : Behavior Spider a) (e : Event Spider c)
+    : SpiderM (Event Spider d) := do
+  let nodeId ← SpiderM.freshNodeId
+  SpiderM.liftIO <| Event.attachWith f b e nodeId
+
+/-- Gate an Event by a Boolean Behavior, auto-allocating NodeId. -/
+def gateM (beh : Behavior Spider Bool) (e : Event Spider a) : SpiderM (Event Spider a) := do
+  let nodeId ← SpiderM.freshNodeId
+  SpiderM.liftIO <| Event.gate beh e nodeId
+
+/-- Merge a list of Events into a list Event, auto-allocating NodeId. -/
+def mergeListM (events : List (Event Spider a)) : SpiderM (Event Spider (List a)) := do
+  let nodeId ← SpiderM.freshNodeId
+  SpiderM.liftIO <| Event.mergeList events nodeId
+
+/-- Take the leftmost firing Event from a list, auto-allocating NodeId. -/
+def leftmostM (events : List (Event Spider a)) : SpiderM (Event Spider a) := do
+  let nodeId ← SpiderM.freshNodeId
+  SpiderM.liftIO <| Event.leftmost events nodeId
+
+/-- Fan out a Sum Event into two Events, auto-allocating NodeIds. -/
+def fanEitherM (e : Event Spider (Sum a b)) : SpiderM (Event Spider a × Event Spider b) := do
+  let nodeIdL ← SpiderM.freshNodeId
+  let nodeIdR ← SpiderM.freshNodeId
+  SpiderM.liftIO <| Event.fanEither e nodeIdL nodeIdR
+
+/-- Delay an Event by one frame, auto-allocating NodeId.
+    Note: Currently a no-op pass-through (see ROADMAP). -/
+def delayM (e : Event Spider a) : SpiderM (Event Spider a) := do
+  let nodeId ← SpiderM.freshNodeId
+  SpiderM.liftIO <| Event.delay e nodeId
+
+/-- Take at most n occurrences from an Event, auto-allocating NodeId. -/
+def takeNM (n : Nat) (e : Event Spider a) : SpiderM (Event Spider a) := do
+  let nodeId ← SpiderM.freshNodeId
+  SpiderM.liftIO <| Event.takeN n e nodeId
+
+/-- Drop the first n occurrences from an Event, auto-allocating NodeId. -/
+def dropNM (n : Nat) (e : Event Spider a) : SpiderM (Event Spider a) := do
+  let nodeId ← SpiderM.freshNodeId
+  SpiderM.liftIO <| Event.dropN n e nodeId
+
+/-- Accumulate values over an Event, auto-allocating NodeId.
+    Like foldDyn but returns an Event instead of a Dynamic. -/
+def accumulateM (f : a → b → b) (initial : b) (e : Event Spider a)
+    : SpiderM (Event Spider b) := do
+  let nodeId ← SpiderM.freshNodeId
+  SpiderM.liftIO <| Event.accumulate f initial e nodeId
+
+/-- Alias for accumulateM (familiar name from other FRP libraries). -/
+abbrev scanM := @accumulateM
+
+end Event
 
 /-- Run a Spider network and return the result -/
 def runSpider (network : SpiderM a) : IO a :=

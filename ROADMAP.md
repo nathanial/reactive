@@ -46,6 +46,19 @@ Added 44 property tests covering boolean algebra, arithmetic, and function compo
 
 Added comprehensive tests for `switchDyn`, `switchDynamic`, `switchHold`, and `switchBehavior`.
 
+### [DONE] Event SpiderM Combinators
+
+Added ergonomic `SpiderM`-based combinators for Events that auto-allocate NodeIds:
+- Core: `Event.mapM`, `filterM`, `mapMaybeM`, `mergeM`
+- Combinators: `tagM`, `attachM`, `attachWithM`, `gateM`, `mergeListM`, `leftmostM`, `fanEitherM`, `delayM`, `takeNM`, `dropNM`, `accumulateM`
+- Plus `scanM` alias for `accumulateM`
+
+Located in `Reactive/Host/Spider.lean`.
+
+### [DONE] Add scan Alias
+
+Added `Event.scan` as an alias for `Event.accumulate` (familiar name from other FRP libraries). Like `foldDyn` but returns an Event instead of a Dynamic.
+
 ---
 
 ## Feature Proposals
@@ -267,25 +280,20 @@ Added comprehensive tests for `switchDyn`, `switchDynamic`, `switchHold`, and `s
 
 ## Code Improvements
 
-### [Priority: Medium] Hide Node ID Management from Public API
+### [DONE] Hide Node ID Management from Public API
 
-**Current State:** Most combinators require explicit `NodeId` parameters (e.g., `Event.map`, `Event.filter`, `Dynamic.zipWith`). Users must manually obtain node IDs via `SpiderM.freshNodeId`.
+**Current State:** SpiderM versions of all major combinators now auto-allocate NodeIds.
 
-**Progress:**
-- ✓ Added Dynamic SpiderM combinators (`mapM`, `zipWithM`, `zipWith3M`, `pureM`, `apM`) in `Reactive/Host/Spider.lean`
-
-**Remaining Work:** Add SpiderM versions of Event combinators (`Event.mapM`, `Event.filterM`, etc.)
+**Completed:**
+- ✓ Dynamic SpiderM combinators (`mapM`, `zipWithM`, `zipWith3M`, `pureM`, `apM`)
+- ✓ Event SpiderM combinators (15 functions including `mapM`, `filterM`, `mergeM`, `scanM`, etc.)
 
 **Benefits:**
 - Dramatically simpler API for common use cases
 - Reduces boilerplate in user code
 - Less error-prone (no risk of reusing node IDs)
 
-**Affected Files:**
-- `/Users/Shared/Projects/lean-workspace/data/reactive/Reactive/Combinators/Event.lean`
-- `/Users/Shared/Projects/lean-workspace/data/reactive/Reactive/Combinators/Switch.lean`
-
-**Estimated Effort:** Small (pattern established)
+**Remaining (optional):** Switch combinator SpiderM versions if needed.
 
 ---
 

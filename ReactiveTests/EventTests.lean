@@ -91,6 +91,139 @@ test "Event.merge combines events" := do
 
   shouldBe result [1, 2, 3]
 
+-- SpiderM Combinator Tests
+
+test "Event.mapM transforms values with auto NodeId" := do
+  let result ← runSpider do
+    let (event, trigger) ← newTriggerEvent (t := Spider) (a := Nat)
+    let mapped ← Event.mapM (· * 2) event
+
+    let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
+    let _ ← SpiderM.liftIO <| mapped.subscribe fun n =>
+      receivedRef.modify (· ++ [n])
+
+    SpiderM.liftIO <| trigger 1
+    SpiderM.liftIO <| trigger 2
+    SpiderM.liftIO <| trigger 3
+    SpiderM.liftIO receivedRef.get
+  shouldBe result [2, 4, 6]
+
+test "Event.filterM filters values with auto NodeId" := do
+  let result ← runSpider do
+    let (event, trigger) ← newTriggerEvent (t := Spider) (a := Nat)
+    let filtered ← Event.filterM (· % 2 == 0) event
+
+    let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
+    let _ ← SpiderM.liftIO <| filtered.subscribe fun n =>
+      receivedRef.modify (· ++ [n])
+
+    SpiderM.liftIO <| trigger 1
+    SpiderM.liftIO <| trigger 2
+    SpiderM.liftIO <| trigger 3
+    SpiderM.liftIO <| trigger 4
+    SpiderM.liftIO receivedRef.get
+  shouldBe result [2, 4]
+
+test "Event.mergeM combines events with auto NodeId" := do
+  let result ← runSpider do
+    let (e1, t1) ← newTriggerEvent (t := Spider) (a := Nat)
+    let (e2, t2) ← newTriggerEvent (t := Spider) (a := Nat)
+    let merged ← Event.mergeM e1 e2
+
+    let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
+    let _ ← SpiderM.liftIO <| merged.subscribe fun n =>
+      receivedRef.modify (· ++ [n])
+
+    SpiderM.liftIO <| t1 1
+    SpiderM.liftIO <| t2 2
+    SpiderM.liftIO <| t1 3
+    SpiderM.liftIO receivedRef.get
+  shouldBe result [1, 2, 3]
+
+test "Event.scanM accumulates values" := do
+  let result ← runSpider do
+    let (event, trigger) ← newTriggerEvent (t := Spider) (a := Nat)
+    let scanned ← Event.scanM (· + ·) 0 event
+
+    let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
+    let _ ← SpiderM.liftIO <| scanned.subscribe fun n =>
+      receivedRef.modify (· ++ [n])
+
+    SpiderM.liftIO <| trigger 1
+    SpiderM.liftIO <| trigger 2
+    SpiderM.liftIO <| trigger 3
+    SpiderM.liftIO receivedRef.get
+  shouldBe result [1, 3, 6]
+
+test "Event.takeNM takes first n occurrences" := do
+  let result ← runSpider do
+    let (event, trigger) ← newTriggerEvent (t := Spider) (a := Nat)
+    let taken ← Event.takeNM 3 event
+
+    let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
+    let _ ← SpiderM.liftIO <| taken.subscribe fun n =>
+      receivedRef.modify (· ++ [n])
+
+    SpiderM.liftIO <| trigger 1
+    SpiderM.liftIO <| trigger 2
+    SpiderM.liftIO <| trigger 3
+    SpiderM.liftIO <| trigger 4
+    SpiderM.liftIO <| trigger 5
+    SpiderM.liftIO receivedRef.get
+  shouldBe result [1, 2, 3]
+
+test "Event.dropNM drops first n occurrences" := do
+  let result ← runSpider do
+    let (event, trigger) ← newTriggerEvent (t := Spider) (a := Nat)
+    let dropped ← Event.dropNM 2 event
+
+    let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
+    let _ ← SpiderM.liftIO <| dropped.subscribe fun n =>
+      receivedRef.modify (· ++ [n])
+
+    SpiderM.liftIO <| trigger 1
+    SpiderM.liftIO <| trigger 2
+    SpiderM.liftIO <| trigger 3
+    SpiderM.liftIO <| trigger 4
+    SpiderM.liftIO receivedRef.get
+  shouldBe result [3, 4]
+
+test "Event.gateM filters by boolean behavior" := do
+  let result ← runSpider do
+    let (event, trigger) ← newTriggerEvent (t := Spider) (a := Nat)
+    let (gateEvent, gateToggle) ← newTriggerEvent (t := Spider) (a := Bool)
+    let gateBehavior ← holdDyn true gateEvent
+    let gated ← Event.gateM gateBehavior.current event
+
+    let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
+    let _ ← SpiderM.liftIO <| gated.subscribe fun n =>
+      receivedRef.modify (· ++ [n])
+
+    SpiderM.liftIO <| trigger 1        -- gate open, passes
+    SpiderM.liftIO <| gateToggle false -- close gate
+    SpiderM.liftIO <| trigger 2        -- gate closed, blocked
+    SpiderM.liftIO <| gateToggle true  -- open gate
+    SpiderM.liftIO <| trigger 3        -- gate open, passes
+    SpiderM.liftIO receivedRef.get
+  shouldBe result [1, 3]
+
+test "Event.leftmostM takes first from list" := do
+  let result ← runSpider do
+    let (e1, t1) ← newTriggerEvent (t := Spider) (a := Nat)
+    let (e2, t2) ← newTriggerEvent (t := Spider) (a := Nat)
+    let (e3, t3) ← newTriggerEvent (t := Spider) (a := Nat)
+    let first ← Event.leftmostM [e1, e2, e3]
+
+    let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
+    let _ ← SpiderM.liftIO <| first.subscribe fun n =>
+      receivedRef.modify (· ++ [n])
+
+    SpiderM.liftIO <| t2 1
+    SpiderM.liftIO <| t1 2
+    SpiderM.liftIO <| t3 3
+    SpiderM.liftIO receivedRef.get
+  shouldBe result [1, 2, 3]
+
 #generate_tests
 
 end ReactiveTests.EventTests
