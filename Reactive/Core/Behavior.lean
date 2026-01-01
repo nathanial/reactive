@@ -5,6 +5,7 @@
   Behaviors are pull-based - values are computed on demand.
 -/
 import Reactive.Core.Types
+import Reactive.Core.Event
 
 namespace Reactive
 
@@ -66,6 +67,41 @@ def zipWith (f : a → b → c) (ba : Behavior t a) (bb : Behavior t b) : Behavi
 /-- Pair two behaviors -/
 def zip (ba : Behavior t a) (bb : Behavior t b) : Behavior t (a × b) :=
   zipWith Prod.mk ba bb
+
+/-- Create a behavior that holds the most recent value from an event.
+    Starts with the initial value and updates whenever the event fires.
+
+    This is a pure alternative to `MonadHold.hold` when you only need
+    sampling capability without the `Dynamic`'s update event.
+
+    Example:
+    ```
+    let (clickEvent, fireClick) ← Event.newTrigger nodeId
+    let clickCount ← Behavior.hold 0 clickEvent
+    -- clickCount.sample returns the most recent value
+    ```
+-/
+def hold [Timeline t] (initial : a) (event : Event t a) : IO (Behavior t a) := do
+  let valueRef ← IO.mkRef initial
+  let _ ← event.subscribe fun a => valueRef.set a
+  Pure.pure (Behavior.fromSample valueRef.get)
+
+/-- Create a behavior by folding over event occurrences.
+    Each event value is combined with the current state using the function.
+
+    Example:
+    ```
+    let (addEvent, fireAdd) ← Event.newTrigger nodeId
+    let total ← Behavior.foldB (· + ·) 0 addEvent
+    -- Each fire of addEvent adds to the running total
+    ```
+-/
+def foldB [Timeline t] (f : a → b → b) (initial : b) (event : Event t a) : IO (Behavior t b) := do
+  let valueRef ← IO.mkRef initial
+  let _ ← event.subscribe fun a => do
+    let old ← valueRef.get
+    valueRef.set (f a old)
+  Pure.pure (Behavior.fromSample valueRef.get)
 
 end Behavior
 

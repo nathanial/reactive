@@ -32,7 +32,11 @@ def clearPropagationContext : IO Unit :=
 def getPropagationContext : IO (Option (IO.Ref PropagationQueue)) :=
   globalPropagationQueue.get
 
-/-- A subscriber callback that receives event values -/
+/-- A subscriber callback that receives event values.
+
+    Subscribers are called synchronously when an event fires.
+    Within a propagation frame, subscribers may be called in any order
+    (except that lower-height events always fire before higher-height ones). -/
 abbrev Subscriber (a : Type) := a → IO Unit
 
 /-- Internal representation of an event with subscriber management.
@@ -114,22 +118,52 @@ protected def newNode [Timeline t] (nodeId : NodeId) (height : Height := ⟨0⟩
   let node ← EventNode.new nodeId height
   pure ⟨node⟩
 
-/-- The event that never fires -/
+/-- The event that never fires.
+
+    Useful as a placeholder or for constant dynamics.
+
+    Example:
+    ```
+    let neverFires ← Event.never (t := Spider)
+    -- This event will never fire, so subscribers are never called
+    ``` -/
 def never [Timeline t] : IO (Event t a) := do
   Event.newNode ⟨0⟩  -- ID 0 reserved for never
 
 /-- Create a new triggerable event.
-    Returns the event and a function to fire it. -/
+    Returns the event and a function to fire it.
+
+    This is the primary way to create events that can be fired from external code.
+    The returned trigger function fires the event when called.
+
+    Example:
+    ```
+    let (clickEvent, fireClick) ← Event.newTrigger nodeId
+    -- Later, to fire the event:
+    fireClick ()
+    ``` -/
 def newTrigger [Timeline t] (nodeId : NodeId) : IO (Event t a × (a → IO Unit)) := do
   let node ← EventNode.new nodeId
   pure (⟨node⟩, node.fire)
 
-/-- Subscribe to an event -/
+/-- Subscribe to an event.
+    Returns an unsubscribe action that removes this subscription.
+
+    Example:
+    ```
+    let unsub ← myEvent.subscribe fun value =>
+      IO.println s!"Received: {value}"
+    -- Later, to stop receiving events:
+    unsub
+    ``` -/
 def subscribe (e : Event t a) (callback : Subscriber a) : IO (IO Unit) :=
   e.node.subscribe callback
 
 /-- Subscribe with scope-based cleanup.
-    The subscription is automatically unsubscribed when the scope is disposed. -/
+    The subscription is automatically unsubscribed when the scope is disposed.
+
+    Prefer this over `subscribe` when working within a `SpiderM` context,
+    as it ensures proper cleanup of subscriptions. -/
 def subscribeScoped (e : Event t a) (scope : SubscriptionScope)
     (callback : Subscriber a) : IO (IO Unit) := do
   let unsub ← e.node.subscribe callback
@@ -148,30 +182,61 @@ def height (e : Event t a) : Height :=
 def nodeId (e : Event t a) : NodeId :=
   e.node.nodeId
 
+/-- Helper to create a derived event from a source event.
+    Creates a new event at source.height + 1 and subscribes with the given handler.
+    The handler receives the source value and the derived event's fire function. -/
+private def deriveWith [Timeline t] (source : Event t a) (derivedNodeId : NodeId)
+    (handler : a → (b → IO Unit) → IO Unit) : IO (Event t b) := do
+  let derived ← Event.newNode derivedNodeId (source.height.inc)
+  let _ ← source.subscribe fun a => handler a derived.fire
+  pure derived
+
 /-- Map a function over event values.
-    Creates a new derived event that transforms values from the source. -/
-def map [Timeline t] (f : a → b) (source : Event t a) (derivedNodeId : NodeId) : IO (Event t b) := do
-  let derived ← Event.newNode derivedNodeId (source.height.inc)
-  let _ ← source.subscribe fun a => derived.fire (f a)
-  pure derived
+    Creates a new derived event that transforms values from the source.
 
-/-- Filter event occurrences by a predicate -/
-def filter [Timeline t] (p : a → Bool) (source : Event t a) (derivedNodeId : NodeId) : IO (Event t a) := do
-  let derived ← Event.newNode derivedNodeId (source.height.inc)
-  let _ ← source.subscribe fun a =>
-    if p a then derived.fire a else pure ()
-  pure derived
+    Example:
+    ```
+    let doubled ← Event.map (· * 2) numberEvent nodeId
+    -- When numberEvent fires 5, doubled fires 10
+    ``` -/
+def map [Timeline t] (f : a → b) (source : Event t a) (derivedNodeId : NodeId) : IO (Event t b) :=
+  deriveWith source derivedNodeId fun a fire => fire (f a)
 
-/-- Filter and map simultaneously -/
-def mapMaybe [Timeline t] (f : a → Option b) (source : Event t a) (derivedNodeId : NodeId) : IO (Event t b) := do
-  let derived ← Event.newNode derivedNodeId (source.height.inc)
-  let _ ← source.subscribe fun a =>
+/-- Filter event occurrences by a predicate.
+    Only values that satisfy the predicate pass through.
+
+    Example:
+    ```
+    let positives ← Event.filter (· > 0) numberEvent nodeId
+    -- When numberEvent fires -5, 3, 0, 7: positives fires 3, 7
+    ``` -/
+def filter [Timeline t] (p : a → Bool) (source : Event t a) (derivedNodeId : NodeId) : IO (Event t a) :=
+  deriveWith source derivedNodeId fun a fire =>
+    if p a then fire a else pure ()
+
+/-- Filter and map simultaneously.
+    Only `some` results pass through; `none` results are dropped.
+
+    Example:
+    ```
+    let parsed ← Event.mapMaybe String.toNat? stringEvent nodeId
+    -- When stringEvent fires "42", "hello", "7": parsed fires 42, 7
+    ``` -/
+def mapMaybe [Timeline t] (f : a → Option b) (source : Event t a) (derivedNodeId : NodeId) : IO (Event t b) :=
+  deriveWith source derivedNodeId fun a fire =>
     match f a with
-    | some b => derived.fire b
+    | some b => fire b
     | none => pure ()
-  pure derived
 
-/-- Merge two events. When both fire simultaneously, both values are delivered. -/
+/-- Merge two events into one.
+    When either fires, the merged event fires with that value.
+    When both fire simultaneously (same frame), both values are delivered.
+
+    Example:
+    ```
+    let combined ← Event.merge clickEvent keyEvent nodeId
+    -- Fires when either click or key fires
+    ``` -/
 def merge [Timeline t] (e1 : Event t a) (e2 : Event t a) (derivedNodeId : NodeId) : IO (Event t a) := do
   let height := Height.inc (max e1.height e2.height)
   let derived ← Event.newNode derivedNodeId height

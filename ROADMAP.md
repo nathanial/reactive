@@ -167,6 +167,31 @@ All SpiderM combinators now register subscriptions with the current scope:
 - `ReactiveTests/ScopeTests.lean` (new - 16 tests)
 - `ReactiveTests/Main.lean` (import ScopeTests)
 
+### [DONE] Behavior.hold and foldB Combinators
+
+Added pure IO-based combinators for creating behaviors from events:
+- `Behavior.hold` - Create a behavior holding the most recent event value
+- `Behavior.foldB` - Create a behavior by folding over event occurrences
+- `Behavior.holdM` - SpiderM version with scope registration
+- `Behavior.foldBM` - SpiderM version with scope registration
+
+### [DONE] Consolidate Event Derivation Pattern
+
+Extracted `Event.deriveWith` helper function to reduce code duplication in:
+- `Event.map`
+- `Event.filter`
+- `Event.mapMaybe`
+
+### [DONE] Improve Documentation
+
+Added comprehensive docstrings with examples to core Event functions:
+- `Subscriber` type alias
+- `Event.never`
+- `Event.newTrigger`
+- `Event.subscribe`
+- `Event.subscribeScoped`
+- `Event.map`, `filter`, `mapMaybe`, `merge`
+
 ---
 
 ## Feature Proposals
