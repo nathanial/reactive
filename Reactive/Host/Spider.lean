@@ -164,6 +164,13 @@ instance : Monad SpiderM where
 instance : MonadLiftT IO SpiderM where
   monadLift io := ⟨fun _ => io⟩
 
+/-- Explicit ForIn instance for SpiderM to avoid runtime issues with the derived one -/
+instance [ForIn IO ρ α] : ForIn SpiderM ρ α where
+  forIn x init f := ⟨fun env => do
+    ForIn.forIn x init fun a b => do
+      let result ← (f a b).run env
+      pure result⟩
+
 /-- Lift IO actions into SpiderM. Shorter alias for `liftM (m := IO)`. -/
 def liftIO (action : IO α) : SpiderM α := liftM (m := IO) action
 
