@@ -42,7 +42,47 @@ def assertFloat3Eq (expected actual : Float × Float × Float) : IO Unit := do
   assertFloatEq expected.2.1 actual.2.1
   assertFloatEq expected.2.2 actual.2.2
 
-/-! ## Gas Pump Example -/
+/-! ## Gas Pump Example
+
+The gas pump is a classic FRP example demonstrating:
+- Dynamic switching (fuel grade selection changes price behavior)
+- State machines (sale lifecycle: Idle → Ready → Pumping → Complete)
+- Compound gating (nozzle must be up AND under prepaid limit)
+- Multiple derived behaviors updating simultaneously
+-/
+
+-- Fuel grades with different prices
+inductive FuelGrade where
+  | regular   -- $3.50/gal
+  | plus      -- $3.80/gal
+  | premium   -- $4.20/gal
+  deriving Repr, BEq, Inhabited
+
+def FuelGrade.price : FuelGrade → Float
+  | .regular => 3.50
+  | .plus => 3.80
+  | .premium => 4.20
+
+def FuelGrade.name : FuelGrade → String
+  | .regular => "Regular"
+  | .plus => "Plus"
+  | .premium => "Premium"
+
+-- Sale lifecycle states
+inductive SaleState where
+  | idle      -- Waiting for customer
+  | ready     -- Grade selected, waiting for nozzle
+  | pumping   -- Actively dispensing fuel
+  | complete  -- Sale finished
+  deriving Repr, BEq, Inhabited
+
+-- Display update messages (what the pump screen shows)
+structure DisplayUpdate where
+  gallons : Float
+  cost : Float
+  grade : FuelGrade
+  state : SaleState
+  deriving Repr
 
 testSuite "Gas Pump"
 
@@ -113,6 +153,234 @@ test "gas pump tracks cost in real-time" := do
     SpiderM.liftIO costUpdatesRef.get
 
   assertFloatListEq [3.0, 6.0, 9.0] result
+
+/-! ### Classic Gas Pump - The Famous FRP Example
+
+This demonstrates the key FRP patterns:
+1. **Dynamic switching**: Selecting a fuel grade switches to a different price behavior
+2. **State machine**: Sale lifecycle with state transitions
+3. **Compound gating**: Flow only when nozzle up AND under limit
+4. **Simultaneous updates**: Multiple displays update together
+-/
+
+test "fuel grade selection dynamically switches price behavior" := do
+  let result ← runSpider do
+    -- Events from the pump interface
+    let (gradeSelectEvent, selectGrade) ← newTriggerEvent (t := Spider) (a := FuelGrade)
+    let (flowEvent, pumpFlow) ← newTriggerEvent (t := Spider) (a := Float)
+
+    -- Current fuel grade (starts with Regular)
+    let gradeDyn ← holdDyn FuelGrade.regular gradeSelectEvent
+
+    -- THE KEY PATTERN: Price behavior switches when grade changes
+    -- This is what makes the gas pump example famous in FRP literature
+    let priceBehavior : Behavior Spider Float := gradeDyn.current.map FuelGrade.price
+
+    -- Accumulate gallons
+    let gallonsDyn ← foldDyn (· + ·) 0.0 flowEvent
+
+    -- Cost derived from current gallons and current price
+    let costBehavior := Behavior.zipWith (· * ·) gallonsDyn.current priceBehavior
+
+    -- Start pumping Regular at $3.50
+    SpiderM.liftIO <| pumpFlow 2.0
+    let cost1 ← sample costBehavior  -- 2.0 * 3.50 = 7.00
+
+    -- Switch to Premium mid-transaction!
+    -- In real life you can't do this, but it demonstrates dynamic switching
+    SpiderM.liftIO <| selectGrade FuelGrade.premium
+    let cost2 ← sample costBehavior  -- 2.0 * 4.20 = 8.40 (price changed!)
+
+    -- Pump more at Premium price
+    SpiderM.liftIO <| pumpFlow 1.0
+    let cost3 ← sample costBehavior  -- 3.0 * 4.20 = 12.60
+
+    pure (cost1, cost2, cost3)
+
+  assertFloat3Eq (7.0, 8.4, 12.6) result
+
+test "nozzle state gates fuel flow" := do
+  let result ← runSpider do
+    -- Nozzle up/down events
+    let (nozzleEvent, setNozzle) ← newTriggerEvent (t := Spider) (a := Bool)
+    let (flowEvent, pumpFlow) ← newTriggerEvent (t := Spider) (a := Float)
+
+    -- Nozzle state (starts down)
+    let nozzleDyn ← holdDyn false nozzleEvent
+
+    -- Only allow flow when nozzle is up
+    let gatedFlow ← Event.gateM nozzleDyn.current flowEvent
+    let gallonsDyn ← foldDyn (· + ·) 0.0 gatedFlow
+
+    -- Try to pump with nozzle down - should be blocked
+    SpiderM.liftIO <| pumpFlow 1.0
+    let g1 ← sample gallonsDyn.current
+
+    -- Lift nozzle
+    SpiderM.liftIO <| setNozzle true
+
+    -- Now pumping works
+    SpiderM.liftIO <| pumpFlow 2.0
+    SpiderM.liftIO <| pumpFlow 1.5
+    let g2 ← sample gallonsDyn.current
+
+    -- Put nozzle down
+    SpiderM.liftIO <| setNozzle false
+
+    -- Blocked again
+    SpiderM.liftIO <| pumpFlow 5.0
+    let g3 ← sample gallonsDyn.current
+
+    pure (g1, g2, g3)
+
+  assertFloat3Eq (0.0, 3.5, 3.5) result
+
+test "compound gating: nozzle up AND under prepaid limit" := do
+  let result ← runSpider do
+    let prepaidAmount : Float := 20.00
+    let pricePerGallon : Float := 4.00
+
+    let (nozzleEvent, setNozzle) ← newTriggerEvent (t := Spider) (a := Bool)
+    let (flowEvent, pumpFlow) ← newTriggerEvent (t := Spider) (a := Float)
+
+    let nozzleDyn ← holdDyn false nozzleEvent
+
+    -- Use fixDynM to create self-referential gating:
+    -- Can only pump when nozzle up AND current cost < prepaid limit
+    let gallonsDyn : Dynamic Spider Float ← SpiderM.fixDynM (a := Float) fun gallonsBehavior => do
+      -- Cost based on current (gated) gallons
+      let costBehavior := gallonsBehavior.map (· * pricePerGallon)
+
+      -- Compound gate: nozzle up AND cost under prepaid limit
+      let canPump : Behavior Spider Bool := Behavior.zipWith (· && ·)
+        nozzleDyn.current
+        (costBehavior.map fun cost => decide (cost < prepaidAmount))
+
+      let gatedFlow ← Event.gateM canPump flowEvent
+      foldDyn (· + ·) (0.0 : Float) gatedFlow
+
+    -- Nozzle down: blocked
+    SpiderM.liftIO <| pumpFlow 1.0
+    let g1 ← sample gallonsDyn.current
+
+    -- Lift nozzle, pump until near limit
+    SpiderM.liftIO <| setNozzle true
+    SpiderM.liftIO <| pumpFlow 2.0  -- $8, passes (cost was 0)
+    SpiderM.liftIO <| pumpFlow 2.0  -- $16, passes (cost was 8)
+    let g2 ← sample gallonsDyn.current
+
+    -- This would put us at $24, blocked (cost is 16 < 20, but 16+8=24 > 20)
+    -- Actually: at cost $16, still under $20, so this passes and we hit $24
+    -- Then the NEXT one would be blocked
+    SpiderM.liftIO <| pumpFlow 2.0  -- passes, cost becomes $24
+    SpiderM.liftIO <| pumpFlow 2.0  -- blocked, cost $24 >= $20
+    let g3 ← sample gallonsDyn.current
+
+    pure (g1, g2, g3)
+
+  -- g1=0 (nozzle down), g2=4 (2+2), g3=6 (4+2, last blocked)
+  assertFloat3Eq (0.0, 4.0, 6.0) result
+
+-- Actions that can affect sale state
+inductive SaleAction where
+  | selectGrade : FuelGrade → SaleAction
+  | setNozzle : Bool → SaleAction
+  | completeSale : SaleAction
+  deriving Repr
+
+test "sale lifecycle state machine" := do
+  let result ← runSpider do
+    -- Single event for all state-affecting actions
+    let (actionEvent, dispatch) ← newTriggerEvent (t := Spider) (a := SaleAction)
+
+    -- Sale state machine
+    -- Idle → Ready (when grade selected)
+    -- Ready → Pumping (when nozzle lifted)
+    -- Pumping → Complete (when nozzle returned)
+    -- Complete → Idle (when sale completed)
+    let stateDyn ← foldDyn (fun action state =>
+      match action with
+      | .selectGrade _ =>
+        if state == SaleState.idle then SaleState.ready else state
+      | .setNozzle nozzleUp =>
+        if state == SaleState.ready && nozzleUp then SaleState.pumping
+        else if state == SaleState.pumping && !nozzleUp then SaleState.complete
+        else state
+      | .completeSale =>
+        SaleState.idle
+    ) SaleState.idle actionEvent
+
+    -- Walk through a sale
+    let s0 ← sample stateDyn.current  -- Idle
+    SpiderM.liftIO <| dispatch (.selectGrade .premium)
+    let s1 ← sample stateDyn.current  -- Ready
+    SpiderM.liftIO <| dispatch (.setNozzle true)
+    let s2 ← sample stateDyn.current  -- Pumping
+    SpiderM.liftIO <| dispatch (.setNozzle false)
+    let s3 ← sample stateDyn.current  -- Complete
+    SpiderM.liftIO <| dispatch .completeSale
+    let s4 ← sample stateDyn.current  -- Back to Idle
+
+    pure (s0, s1, s2, s3, s4)
+
+  shouldBe result (SaleState.idle, SaleState.ready, SaleState.pumping,
+                   SaleState.complete, SaleState.idle)
+
+test "full gas pump session with display updates" := do
+  let result ← runSpider do
+    -- All the events
+    let (gradeSelectEvent, selectGrade) ← newTriggerEvent (t := Spider) (a := FuelGrade)
+    let (nozzleEvent, setNozzle) ← newTriggerEvent (t := Spider) (a := Bool)
+    let (flowEvent, pumpFlow) ← newTriggerEvent (t := Spider) (a := Float)
+
+    -- Core state
+    let gradeDyn ← holdDyn FuelGrade.regular gradeSelectEvent
+    let nozzleDyn ← holdDyn false nozzleEvent
+
+    -- Price switches with grade selection
+    let priceBehavior := gradeDyn.current.map FuelGrade.price
+
+    -- Gate flow on nozzle
+    let gatedFlow ← Event.gateM nozzleDyn.current flowEvent
+    let gallonsDyn ← foldDyn (· + ·) 0.0 gatedFlow
+
+    -- Cost derived from gallons and current price
+    let costBehavior := Behavior.zipWith (· * ·) gallonsDyn.current priceBehavior
+
+    -- Simple state: pumping when nozzle is up and gallons > 0
+    let stateBehavior := Behavior.zipWith (fun nozzle gallons =>
+      if nozzle && gallons > 0.0 then SaleState.pumping
+      else if gallons > 0.0 then SaleState.complete
+      else if nozzle then SaleState.ready
+      else SaleState.idle
+    ) nozzleDyn.current gallonsDyn.current
+
+    -- Track all display updates when gallons change
+    let displaysRef ← SpiderM.liftIO <| IO.mkRef ([] : List DisplayUpdate)
+    let _ ← SpiderM.liftIO <| gallonsDyn.updated.subscribe fun gallons => do
+      let grade ← gradeDyn.current.sample
+      let cost ← costBehavior.sample
+      let state ← stateBehavior.sample
+      displaysRef.modify (· ++ [{ gallons, cost, grade, state }])
+
+    -- Full session
+    SpiderM.liftIO <| selectGrade FuelGrade.plus  -- Select Plus ($3.80)
+    SpiderM.liftIO <| setNozzle true               -- Lift nozzle
+    SpiderM.liftIO <| pumpFlow 2.0                 -- Pump 2 gallons
+    SpiderM.liftIO <| pumpFlow 3.0                 -- Pump 3 more
+    SpiderM.liftIO <| setNozzle false              -- Return nozzle
+
+    -- Get final values
+    let finalGallons ← sample gallonsDyn.current
+    let finalCost ← sample costBehavior
+    let displays ← SpiderM.liftIO displaysRef.get
+
+    pure (finalGallons, finalCost, displays.length)
+
+  -- 5 gallons at $3.80 = $19.00, 2 display updates
+  assertFloatEq 5.0 result.1
+  assertFloatEq 19.0 result.2.1
+  shouldBe result.2.2 2  -- Two flow events = two display updates
 
 /-! ## Form Validation Example -/
 
