@@ -157,49 +157,22 @@ Added comprehensive tests for `switchDyn`, `switchDynamic`, `switchHold`, and `s
 
 ---
 
-### [Priority: Medium] switchBehavior Change Detection
+### [Priority: Low] Dynamic Functor and Applicative Instances
 
-**Description:** Enhance `switch` combinator to properly detect when the outer behavior changes to a new inner event.
+**Description:** Add pure `Functor`, `Applicative`, and potentially `Monad` instances for `Dynamic`.
 
-**Rationale:** The current `switch` implementation (lines 13-26 of Switch.lean) only subscribes to the initial event and does not track behavior changes. The comment explicitly notes this limitation. This is essential for dynamic FRP patterns where the structure of the event network changes over time.
+**Rationale:** `Behavior` has full monad instances, making it ergonomic to compose. `Dynamic` lacks these instances because Dynamic operations are inherently effectful (require NodeId allocation).
 
-**Affected Files:**
-- `/Users/Shared/Projects/lean-workspace/data/reactive/Reactive/Combinators/Switch.lean`
+**Current Workaround:** SpiderM-based combinators (`Dynamic.mapM`, `zipWithM`, `pureM`, `apM`) provide ergonomic composition within SpiderM context. See `Reactive/Host/Spider.lean`.
 
-**Estimated Effort:** Medium
-
-**Dependencies:** May benefit from frame-based event handling
-
----
-
-### [Priority: Medium] switchDynamic Proper Implementation
-
-**Description:** Fix `switchDynamic` to properly propagate inner dynamic value changes.
-
-**Rationale:** The current implementation (lines 56-82 of Switch.lean) has a comment acknowledging it cannot easily update the result dynamic when inner values change. This breaks the expected semantics of nested dynamic switching.
-
-**Affected Files:**
-- `/Users/Shared/Projects/lean-workspace/data/reactive/Reactive/Combinators/Switch.lean`
-- `/Users/Shared/Projects/lean-workspace/data/reactive/Reactive/Core/Dynamic.lean`
-
-**Estimated Effort:** Medium
-
-**Dependencies:** None
-
----
-
-### [Priority: Medium] Dynamic Functor and Applicative Instances
-
-**Description:** Add `Functor`, `Applicative`, and potentially `Monad` instances for `Dynamic`.
-
-**Rationale:** `Behavior` has full monad instances, making it ergonomic to compose. `Dynamic` lacks these instances, requiring explicit `Dynamic.map` and `Dynamic.zipWith` calls with manual node ID management. Adding typeclass instances would significantly improve the API ergonomics.
+**Remaining Work:** Pure typeclass instances would require a `ReaderT NodeIdGenerator` approach or similar to handle NodeId allocation transparently.
 
 **Affected Files:**
 - `/Users/Shared/Projects/lean-workspace/data/reactive/Reactive/Core/Dynamic.lean`
 
 **Estimated Effort:** Medium
 
-**Dependencies:** Need to decide how to handle node ID generation in pure contexts (may require `ReaderT NodeIdGenerator` approach)
+**Dependencies:** Design decision on NodeId generation strategy
 
 ---
 
@@ -294,11 +267,14 @@ Added comprehensive tests for `switchDyn`, `switchDynamic`, `switchHold`, and `s
 
 ## Code Improvements
 
-### [Priority: High] Hide Node ID Management from Public API
+### [Priority: Medium] Hide Node ID Management from Public API
 
 **Current State:** Most combinators require explicit `NodeId` parameters (e.g., `Event.map`, `Event.filter`, `Dynamic.zipWith`). Users must manually obtain node IDs via `SpiderM.freshNodeId`.
 
-**Proposed Change:** Provide higher-level versions of combinators that work within `SpiderM` and automatically allocate node IDs. Keep low-level versions for advanced use cases.
+**Progress:**
+- ✓ Added Dynamic SpiderM combinators (`mapM`, `zipWithM`, `zipWith3M`, `pureM`, `apM`) in `Reactive/Host/Spider.lean`
+
+**Remaining Work:** Add SpiderM versions of Event combinators (`Event.mapM`, `Event.filterM`, etc.)
 
 **Benefits:**
 - Dramatically simpler API for common use cases
@@ -307,28 +283,22 @@ Added comprehensive tests for `switchDyn`, `switchDynamic`, `switchHold`, and `s
 
 **Affected Files:**
 - `/Users/Shared/Projects/lean-workspace/data/reactive/Reactive/Combinators/Event.lean`
-- `/Users/Shared/Projects/lean-workspace/data/reactive/Reactive/Combinators/Dynamic.lean`
 - `/Users/Shared/Projects/lean-workspace/data/reactive/Reactive/Combinators/Switch.lean`
 
-**Estimated Effort:** Medium
+**Estimated Effort:** Small (pattern established)
 
 ---
 
-### [Priority: Medium] Consistent liftM Usage Pattern
+### [Priority: Low] Consistent liftM Usage Pattern
 
 **Current State:** Test code and examples use verbose `liftM (m := IO) <| ...` for lifting IO actions into SpiderM.
 
-**Proposed Change:**
-1. Add convenience functions like `liftIO` for common patterns
-2. Consider making more combinators work directly in SpiderM
-3. Document the preferred lifting patterns
-
-**Benefits:**
-- Cleaner, more readable code
-- Lower barrier to entry for new users
+**Progress:**
+1. ✓ Added `SpiderM.liftIO` convenience function
+2. Remaining: Update existing tests to use `liftIO` instead of `liftM (m := IO)`
+3. Remaining: Document preferred lifting patterns
 
 **Affected Files:**
-- `/Users/Shared/Projects/lean-workspace/data/reactive/Reactive/Host/Spider.lean`
 - `/Users/Shared/Projects/lean-workspace/data/reactive/ReactiveTests/*.lean` (update examples)
 
 **Estimated Effort:** Small
@@ -402,19 +372,17 @@ Added comprehensive tests for `switchDyn`, `switchDynamic`, `switchHold`, and `s
 
 ---
 
-### [Priority: Medium] Remove Unused Height Field Usage
+### [Priority: Medium] Implement Height-Based Propagation Ordering
 
-**Issue:** The `Height` type and height-based ordering infrastructure exists but is not actually used for glitch prevention. Heights are assigned but never used for topological sorting during propagation.
+**Issue:** The `Height` type exists as scaffolding for glitch-free propagation, but heights are not yet used for topological sorting during propagation.
 
 **Location:**
-- `/Users/Shared/Projects/lean-workspace/data/reactive/Reactive/Core/Types.lean`
+- `/Users/Shared/Projects/lean-workspace/data/reactive/Reactive/Core/Types.lean` (Height documented as scaffolding)
 - `/Users/Shared/Projects/lean-workspace/data/reactive/Reactive/Core/Event.lean`
 
-**Action Required:** Either:
-1. Implement proper height-based propagation ordering (see Frame-Based Event Handling feature)
-2. Or remove height tracking if not planning to implement it soon (simplifies code)
+**Action Required:** Implement proper height-based propagation ordering (see Frame-Based Event Handling feature).
 
-**Estimated Effort:** Small (if removing), Large (if implementing)
+**Estimated Effort:** Large (part of frame-based event handling)
 
 ---
 
@@ -423,31 +391,21 @@ Added comprehensive tests for `switchDyn`, `switchDynamic`, `switchHold`, and `s
 **Issue:** Tests cover basic functionality but lack coverage for:
 - Edge cases (empty events, zero subscribers)
 - Combinator interactions
-- Switching combinators
 - Error conditions
 - Memory leak scenarios
 
+**Progress:**
+- ✓ Added switch combinator tests (`ReactiveTests/SwitchTests.lean`)
+- ✓ Added property tests for FRP laws (`ReactiveTests/PropertyTests.lean`)
+
 **Location:** `/Users/Shared/Projects/lean-workspace/data/reactive/ReactiveTests/`
 
-**Action Required:**
-1. Add tests for all combinators in Event.lean, Behavior.lean, Dynamic.lean, Switch.lean
-2. Add tests for switching behavior
-3. Add stress tests for subscription management
-4. Add tests for complex network topologies
+**Remaining Work:**
+1. Add tests for all combinators in Event.lean, Behavior.lean
+2. Add stress tests for subscription management
+3. Add tests for complex network topologies
 
 **Estimated Effort:** Medium
-
----
-
-### [Priority: Low] Unused PropagationState
-
-**Issue:** `PropagationState` is defined in Types.lean but never used.
-
-**Location:** `/Users/Shared/Projects/lean-workspace/data/reactive/Reactive/Core/Types.lean` (lines 51-57)
-
-**Action Required:** Either integrate it into the propagation system or remove it if not needed in the current design.
-
-**Estimated Effort:** Small
 
 ---
 
