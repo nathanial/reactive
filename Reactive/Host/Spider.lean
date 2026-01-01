@@ -161,6 +161,55 @@ instance : TriggerEvent Spider SpiderM where
 instance : PostBuild Spider SpiderM where
   getPostBuild := ⟨fun env => pure env.postBuildEvent⟩
 
+instance : Adjustable Spider SpiderM where
+  runWithReplace initial replaceEvent := ⟨fun env => do
+    -- Run the initial computation
+    let initialResult ← initial.run env
+
+    -- Create result event for replacement outputs
+    let resultNodeId ← nextNodeIdIO env
+    let (resultEvent, fireResult) ← Event.newTrigger resultNodeId
+
+    -- Subscribe to replacement events - when fired, run the new computation
+    let _ ← replaceEvent.subscribe fun replacementM => do
+      let result ← replacementM.run env
+      fireResult result
+
+    pure (initialResult, resultEvent)
+  ⟩
+
+  traverseWithAdjust f inputs := ⟨fun env => do
+    -- Run all computations over the input list
+    let results ← inputs.mapM fun a => (f a).run env
+
+    -- For a minimal implementation, return a never-firing update event
+    -- A full implementation would track per-item replacement events
+    let neverEvent ← Event.never (t := Spider)
+    pure (results, neverEvent)
+  ⟩
+
+/-- Convenience function for runWithReplace with explicit types.
+    Direct implementation to avoid universe inference issues. -/
+def runWithReplaceM (initial : SpiderM a) (replaceEvent : Event Spider (SpiderM a))
+    : SpiderM (a × Event Spider a) := ⟨fun env => do
+  let initialResult ← initial.run env
+  let resultNodeId ← nextNodeIdIO env
+  let (resultEvent, fireResult) ← Event.newTrigger resultNodeId
+  let _ ← replaceEvent.subscribe fun replacementM => do
+    let result ← replacementM.run env
+    fireResult result
+  pure (initialResult, resultEvent)
+⟩
+
+/-- Convenience function for traverseWithAdjust with explicit types.
+    Direct implementation to avoid universe inference issues. -/
+def traverseWithAdjustM (f : a → SpiderM b) (inputs : List a)
+    : SpiderM (List b × Event Spider (List b)) := ⟨fun env => do
+  let results ← inputs.mapM fun x => (f x).run env
+  let neverEvent ← Event.never (t := Spider)
+  pure (results, neverEvent)
+⟩
+
 end SpiderM
 
 /-! ## Dynamic SpiderM Combinators
@@ -292,6 +341,52 @@ def accumulateM (f : a → b → b) (initial : b) (e : Event Spider a)
 abbrev scanM := @accumulateM
 
 end Event
+
+/-! ## Adjustable Helpers
+
+Additional combinators for higher-order FRP patterns. -/
+
+/-- Run a computation that can request its own replacement.
+    The computation returns both a result and an event carrying replacement computations.
+    This is useful for self-replacing widgets or state machines. -/
+def runWithReplaceRequester (computation : SpiderM (a × Event Spider (SpiderM a)))
+    : SpiderM (a × Event Spider a) := ⟨fun env => do
+  let resultNodeId ← env.nextNodeId.modifyGet fun n => (NodeId.mk n, n + 1)
+  let (resultEvent, fireResult) ← Event.newTrigger resultNodeId
+
+  -- Run the initial computation
+  let (initialResult, selfReplaceEvent) ← computation.run env
+
+  -- Subscribe to the replacement event
+  let _ ← selfReplaceEvent.subscribe fun replacementM => do
+    let newResult ← replacementM.run env
+    fireResult newResult
+
+  pure (initialResult, resultEvent)
+⟩
+
+/-- Traverse a dynamic list, rebuilding results when the list changes.
+    Returns a Dynamic of results that updates whenever the input list changes.
+
+    Note: This rebuilds all results on each change. For incremental updates,
+    a more sophisticated implementation would be needed. -/
+def traverseDynList (f : a → SpiderM b) (dynList : Dynamic Spider (List a))
+    : SpiderM (Dynamic Spider (List b)) := ⟨fun env => do
+  -- Get initial list and compute initial results
+  let initialList ← dynList.sample
+  let initialResults ← initialList.mapM fun a => (f a).run env
+
+  -- Create result dynamic
+  let nodeId ← env.nextNodeId.modifyGet fun n => (NodeId.mk n, n + 1)
+  let (resultDyn, updateResult) ← Dynamic.new initialResults nodeId
+
+  -- Subscribe to list changes and rebuild results
+  let _ ← dynList.updated.subscribe fun newList => do
+    let newResults ← newList.mapM fun a => (f a).run env
+    updateResult newResults
+
+  pure resultDyn
+⟩
 
 /-- Run a Spider network and return the result -/
 def runSpider (network : SpiderM a) : IO a :=

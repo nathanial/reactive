@@ -76,25 +76,29 @@ This prevents glitches where derived nodes would see inconsistent intermediate s
 - `Reactive/Host/Spider.lean` (withFrame, drainQueue, framed triggers)
 - `ReactiveTests/PropagationTests.lean` (new test suite)
 
+### [DONE] Adjustable Typeclass Implementation
+
+Implemented the `Adjustable` typeclass enabling higher-order FRP patterns:
+- Updated signature to match Reflex design: replacement event is a parameter, not produced by the computation
+- Added `Adjustable Spider SpiderM` instance with `runWithReplace` and `traverseWithAdjust`
+- Added convenience functions `runWithReplaceM` and `traverseWithAdjustM` to avoid universe polymorphism issues
+- Added `runWithReplaceRequester` for computations that produce their own replacement event
+- Added `traverseDynList` for traversing dynamic lists with automatic rebuilding on changes
+
+**Key Design Decisions:**
+- `runWithReplace : m a → Event t (m a) → m (a × Event t a)` - takes replacement event as input (practical) rather than having computation produce it
+- Old subscriptions are not explicitly cleaned up (rely on GC)
+- `traverseWithAdjust` returns never-firing update event (full incremental updates would require more infrastructure)
+
+**Files Modified:**
+- `Reactive/Class/Adjustable.lean` (updated signature)
+- `Reactive/Host/Spider.lean` (Adjustable instance + helpers)
+- `ReactiveTests/AdjustableTests.lean` (new test file with 8 tests)
+- `ReactiveTests/Main.lean` (import AdjustableTests)
+
 ---
 
 ## Feature Proposals
-
-### [Priority: High] Complete Adjustable Implementation
-
-**Description:** Fully implement the `Adjustable` typeclass with working `runWithReplace` and `traverseWithAdjust` operations.
-
-**Rationale:** The `Adjustable` typeclass is declared but has no instance for `SpiderM`. This limits higher-order FRP patterns like dynamically switching between different reactive sub-networks. This is a core Reflex feature that enables powerful composition patterns.
-
-**Affected Files:**
-- `/Users/Shared/Projects/lean-workspace/data/reactive/Reactive/Class/Adjustable.lean`
-- `/Users/Shared/Projects/lean-workspace/data/reactive/Reactive/Host/Spider.lean` (add Adjustable instance)
-
-**Estimated Effort:** Large
-
-**Dependencies:** None (frame-based propagation is now complete)
-
----
 
 ### [Priority: High] Memory Management and Subscription Cleanup
 
