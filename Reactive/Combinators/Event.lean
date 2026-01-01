@@ -46,15 +46,47 @@ def gate [Timeline t] (beh : Behavior t Bool) (e : Event t a) (nodeId : NodeId) 
   pure derived
 
 /-- Merge multiple events into one.
-    When multiple events fire simultaneously, all values are collected. -/
+    When multiple events fire simultaneously, all values are collected into a single list.
+    Uses frame-based propagation to batch events at the same height. -/
 def mergeList [Timeline t] (events : List (Event t a)) (nodeId : NodeId) : IO (Event t (List a)) := do
   let maxHeight := events.foldl (fun h e => max h e.height) ⟨0⟩
   let derived ← Event.newNode nodeId (maxHeight.inc)
 
-  -- For each source event, we need to collect simultaneous occurrences
-  -- This is a simplified version that fires for each individual occurrence
+  -- Buffer for collecting simultaneous occurrences within a frame
+  let bufferRef ← IO.mkRef ([] : List a)
+  -- Track whether a flush is already scheduled for this frame
+  let flushScheduledRef ← IO.mkRef false
+
   for e in events do
-    let _ ← e.subscribe fun a => derived.fire [a]
+    let _ ← e.subscribe fun a => do
+      -- Add value to buffer
+      bufferRef.modify (· ++ [a])
+
+      -- Schedule flush at derived height if not already scheduled
+      let alreadyScheduled ← flushScheduledRef.get
+      if !alreadyScheduled then
+        flushScheduledRef.set true
+
+        -- Define the flush action
+        let flushAction : IO Unit := do
+          flushScheduledRef.set false
+          let values ← bufferRef.modifyGet fun vs => (vs, [])
+          if !values.isEmpty then
+            derived.fire values
+
+        -- Schedule at derived height so it runs after all source events
+        match ← getPropagationContext with
+        | some queueRef =>
+          let q ← queueRef.get
+          if q.inFrame then
+            let pending : PendingFire := ⟨derived.height, nodeId, flushAction⟩
+            queueRef.set (q.insert pending)
+          else
+            -- Not in frame, flush immediately
+            flushAction
+        | none =>
+          -- No propagation context, flush immediately
+          flushAction
 
   pure derived
 

@@ -90,6 +90,10 @@ Implemented comprehensive temporal event combinators:
 - `lakefile.lean` (added chronos dependency)
 - `ReactiveTests/TemporalTests.lean` (new test file with 11 tests)
 
+### [DONE] Event Batching for mergeList
+
+Fixed `Event.mergeList` to properly batch simultaneous events into a single list instead of firing separate `[a]` lists for each event. Uses frame-based propagation: collects values in a buffer, schedules flush at derived height, fires all collected values as one batch.
+
 ### [DONE] Frame-Based Glitch-Free Propagation
 
 Implemented true frame-based event handling with height-ordered processing:
@@ -164,18 +168,20 @@ Implemented. See "Temporal Combinators" in Recently Completed section.
 
 ---
 
-### [Priority: Medium] Event Batching for mergeList
+### [DONE] Event Batching for mergeList
 
-**Description:** Improve `Event.mergeList` to properly batch simultaneous occurrences into a single list.
+Fixed `Event.mergeList` to properly batch simultaneous events into a single list.
 
-**Rationale:** The current implementation (lines 48-59 of Event.lean) fires individual `[a]` lists for each event, rather than batching truly simultaneous events. The comment acknowledges this limitation. Proper batching requires frame-based propagation.
+**Implementation:**
+- Uses a buffer to collect values from all source events within a frame
+- Schedules a single flush action at the derived node's height
+- When flush runs (after all lower-height sources have fired), fires collected values as one batch
 
-**Affected Files:**
-- `/Users/Shared/Projects/lean-workspace/data/reactive/Reactive/Combinators/Event.lean`
-
-**Estimated Effort:** Medium
-
-**Dependencies:** None (frame-based propagation is now complete)
+**Tests Added:** 4 new tests in `PropagationTests.lean`:
+- `mergeList batches simultaneous events`
+- `mergeList batches from diamond pattern`
+- `mergeList separate frames produce separate batches`
+- `mergeList with single event fires single-element list`
 
 ---
 

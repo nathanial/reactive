@@ -134,6 +134,90 @@ test "complex graph maintains height ordering" := do
   -- The exact order within same height depends on nodeId
   ensure (result.length == 4) s!"Expected 4 values, got {result.length}: {result}"
 
+/-! ## mergeList Batching Tests -/
+
+test "mergeList batches simultaneous events" := do
+  let result ← runSpider do
+    let (t1, fire1) ← newTriggerEvent (t := Spider) (a := Nat)
+    let (t2, fire2) ← newTriggerEvent (t := Spider) (a := Nat)
+    let (t3, fire3) ← newTriggerEvent (t := Spider) (a := Nat)
+
+    let merged ← Event.mergeListM [t1, t2, t3]
+
+    let batchesRef ← SpiderM.liftIO <| IO.mkRef ([] : List (List Nat))
+    let _ ← SpiderM.liftIO <| merged.subscribe fun batch =>
+      batchesRef.modify (· ++ [batch])
+
+    -- Fire all three in the same frame (same trigger call triggers all)
+    -- We need a single event that triggers all three
+    let (combo, fireCombo) ← newTriggerEvent (t := Spider) (a := Unit)
+    let _ ← SpiderM.liftIO <| combo.subscribe fun _ => do
+      fire1 1
+      fire2 2
+      fire3 3
+
+    SpiderM.liftIO <| fireCombo ()
+    SpiderM.liftIO batchesRef.get
+
+  -- Should receive one batch with all three values
+  shouldBe result [[1, 2, 3]]
+
+test "mergeList batches from diamond pattern" := do
+  let result ← runSpider do
+    let (trigger, fire) ← newTriggerEvent (t := Spider) (a := Nat)
+
+    -- Create two derived events from same source
+    let e1 ← Event.mapM (· * 2) trigger
+    let e2 ← Event.mapM (· * 3) trigger
+
+    let merged ← Event.mergeListM [e1, e2]
+
+    let batchesRef ← SpiderM.liftIO <| IO.mkRef ([] : List (List Nat))
+    let _ ← SpiderM.liftIO <| merged.subscribe fun batch =>
+      batchesRef.modify (· ++ [batch])
+
+    SpiderM.liftIO <| fire 5
+    SpiderM.liftIO batchesRef.get
+
+  -- Both e1 and e2 fire in same frame, should be batched
+  -- Order depends on nodeId (e1 created first, so 10 before 15)
+  shouldBe result [[10, 15]]
+
+test "mergeList separate frames produce separate batches" := do
+  let result ← runSpider do
+    let (t1, fire1) ← newTriggerEvent (t := Spider) (a := Nat)
+    let (t2, fire2) ← newTriggerEvent (t := Spider) (a := Nat)
+
+    let merged ← Event.mergeListM [t1, t2]
+
+    let batchesRef ← SpiderM.liftIO <| IO.mkRef ([] : List (List Nat))
+    let _ ← SpiderM.liftIO <| merged.subscribe fun batch =>
+      batchesRef.modify (· ++ [batch])
+
+    -- Fire in separate frames
+    SpiderM.liftIO <| fire1 1
+    SpiderM.liftIO <| fire2 2
+
+    SpiderM.liftIO batchesRef.get
+
+  -- Each fire is a separate frame, so separate batches
+  shouldBe result [[1], [2]]
+
+test "mergeList with single event fires single-element list" := do
+  let result ← runSpider do
+    let (trigger, fire) ← newTriggerEvent (t := Spider) (a := Nat)
+
+    let merged ← Event.mergeListM [trigger]
+
+    let batchesRef ← SpiderM.liftIO <| IO.mkRef ([] : List (List Nat))
+    let _ ← SpiderM.liftIO <| merged.subscribe fun batch =>
+      batchesRef.modify (· ++ [batch])
+
+    SpiderM.liftIO <| fire 42
+    SpiderM.liftIO batchesRef.get
+
+  shouldBe result [[42]]
+
 #generate_tests
 
 end ReactiveTests.PropagationTests
