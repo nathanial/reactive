@@ -10,6 +10,10 @@ import ReactiveTests.TemporalTests
 import ReactiveTests.ScopeTests
 import ReactiveTests.RecursiveTests
 import ReactiveTests.IntegrationTests
+import ReactiveTests.ErrorTests
+import ReactiveTests.EdgeCaseTests
+import ReactiveTests.IntegrationHelperTests
+import ReactiveTests.FluentApiTests
 
 open Crucible
 

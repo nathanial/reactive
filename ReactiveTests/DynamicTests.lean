@@ -150,6 +150,113 @@ test "Dynamic.zipWith3M combines three dynamics" := do
     pure (v0, v1, v2, v3)
   shouldBe result (6, 15, 33, 60)
 
+-- New tests for full coverage
+
+test "Dynamic.value is alias for sample" := do
+  let result ← runSpider do
+    let (event, trigger) ← newTriggerEvent (t := Spider) (a := Nat)
+    let dyn ← holdDyn 100 event
+    let v0 ← SpiderM.liftIO <| Dynamic.value dyn
+    SpiderM.liftIO <| trigger 200
+    let v1 ← SpiderM.liftIO <| Dynamic.value dyn
+    pure (v0, v1)
+  shouldBe result (100, 200)
+
+test "Dynamic.toBehavior returns current behavior" := do
+  let result ← runSpider do
+    let (event, trigger) ← newTriggerEvent (t := Spider) (a := String)
+    let dyn ← holdDyn "initial" event
+    let behavior := Dynamic.toBehavior dyn
+    let v0 ← behavior.sample
+    SpiderM.liftIO <| trigger "changed"
+    let v1 ← behavior.sample
+    pure (v0, v1)
+  shouldBe result ("initial", "changed")
+
+test "Dynamic.pure' creates constant dynamic via IO" := do
+  let result ← runSpider do
+    let ctx ← SpiderM.getTimelineCtx
+    let dyn ← SpiderM.liftIO <| Dynamic.pure' ctx 99
+    SpiderM.liftIO <| dyn.sample
+  shouldBe result 99
+
+test "Dynamic.tagUpdated tags update event with constant value" := do
+  let result ← runSpider do
+    let ctx ← SpiderM.getTimelineCtx
+    let (event, trigger) ← newTriggerEvent (t := Spider) (a := Nat)
+    let dyn ← holdDyn 0 event
+    let tagged ← SpiderM.liftIO <| Dynamic.tagUpdated ctx "fired" dyn
+
+    let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List String)
+    let _ ← SpiderM.liftIO <| tagged.subscribe fun s =>
+      receivedRef.modify (· ++ [s])
+
+    SpiderM.liftIO <| trigger 1
+    SpiderM.liftIO <| trigger 2
+    SpiderM.liftIO <| trigger 3
+    SpiderM.liftIO receivedRef.get
+  shouldBe result ["fired", "fired", "fired"]
+
+test "Dynamic.changes provides old and new values" := do
+  let result ← runSpider do
+    let ctx ← SpiderM.getTimelineCtx
+    let (event, trigger) ← newTriggerEvent (t := Spider) (a := Nat)
+    let dyn ← holdDyn 0 event
+    let changesEvent ← SpiderM.liftIO <| Dynamic.changes ctx dyn
+
+    let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List (Nat × Nat))
+    let _ ← SpiderM.liftIO <| changesEvent.subscribe fun pair =>
+      receivedRef.modify (· ++ [pair])
+
+    SpiderM.liftIO <| trigger 5   -- old=0, new=5
+    SpiderM.liftIO <| trigger 10  -- old=5, new=10
+    SpiderM.liftIO <| trigger 3   -- old=10, new=3
+    SpiderM.liftIO receivedRef.get
+  shouldBe result [(0, 5), (5, 10), (10, 3)]
+
+test "Dynamic.new allows manual value updates" := do
+  let result ← runSpider do
+    let ctx ← SpiderM.getTimelineCtx
+    let (dyn, update) ← SpiderM.liftIO <| Dynamic.new ctx 0
+    let v0 ← SpiderM.liftIO <| dyn.sample
+    SpiderM.liftIO <| update 42
+    let v1 ← SpiderM.liftIO <| dyn.sample
+    SpiderM.liftIO <| update 100
+    let v2 ← SpiderM.liftIO <| dyn.sample
+    pure (v0, v1, v2)
+  shouldBe result (0, 42, 100)
+
+test "Dynamic.new update fires updated event" := do
+  let result ← runSpider do
+    let ctx ← SpiderM.getTimelineCtx
+    let (dyn, update) ← SpiderM.liftIO <| Dynamic.new ctx 0
+
+    let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
+    let _ ← SpiderM.liftIO <| dyn.updated.subscribe fun n =>
+      receivedRef.modify (· ++ [n])
+
+    SpiderM.liftIO <| update 1
+    SpiderM.liftIO <| update 2
+    SpiderM.liftIO <| update 3
+    SpiderM.liftIO receivedRef.get
+  shouldBe result [1, 2, 3]
+
+test "Dynamic.zip pairs two dynamics" := do
+  let result ← runSpider do
+    let (e1, t1) ← newTriggerEvent (t := Spider) (a := Nat)
+    let (e2, t2) ← newTriggerEvent (t := Spider) (a := String)
+    let d1 ← holdDyn 10 e1
+    let d2 ← holdDyn "hello" e2
+    let zipped ← Dynamic.zip' d1 d2
+
+    let v0 ← SpiderM.liftIO <| zipped.sample
+    SpiderM.liftIO <| t1 20
+    let v1 ← SpiderM.liftIO <| zipped.sample
+    SpiderM.liftIO <| t2 "world"
+    let v2 ← SpiderM.liftIO <| zipped.sample
+    pure (v0, v1, v2)
+  shouldBe result ((10, "hello"), (20, "hello"), (20, "world"))
+
 #generate_tests
 
 end ReactiveTests.DynamicTests

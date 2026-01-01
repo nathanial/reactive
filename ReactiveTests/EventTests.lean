@@ -276,6 +276,157 @@ test "Fluent Event.gate' and merge'" := do
     SpiderM.liftIO receivedRef.get
   shouldBe result [1, 2, 3]
 
+-- New tests for full coverage
+
+test "Event.never never fires" := do
+  let result ← runSpider do
+    let ctx ← SpiderM.getTimelineCtx
+    let neverEvent ← SpiderM.liftIO <| Event.never (t := Spider) ctx (a := Nat)
+    let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
+    let _ ← SpiderM.liftIO <| neverEvent.subscribe fun n =>
+      receivedRef.modify (· ++ [n])
+    -- The event never fires, so receivedRef should stay empty
+    SpiderM.liftIO receivedRef.get
+  shouldBe result []
+
+test "Event.mapMaybeM filters and transforms" := do
+  let result ← runSpider do
+    let (event, trigger) ← newTriggerEvent (t := Spider) (a := Nat)
+    -- Only pass through even numbers, and halve them
+    let filtered ← Event.mapMaybeM (fun n =>
+      if n % 2 == 0 then some (n / 2) else none) event
+
+    let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
+    let _ ← SpiderM.liftIO <| filtered.subscribe fun n =>
+      receivedRef.modify (· ++ [n])
+
+    SpiderM.liftIO <| trigger 1  -- odd, filtered out
+    SpiderM.liftIO <| trigger 4  -- even, becomes 2
+    SpiderM.liftIO <| trigger 5  -- odd, filtered out
+    SpiderM.liftIO <| trigger 10 -- even, becomes 5
+    SpiderM.liftIO receivedRef.get
+  shouldBe result [2, 5]
+
+test "Event.attachM pairs event with behavior value" := do
+  let result ← runSpider do
+    let (event, trigger) ← newTriggerEvent (t := Spider) (a := String)
+    let counterBehavior := Behavior.constant 42
+    let attached ← Event.attachM counterBehavior event
+
+    let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List (Nat × String))
+    let _ ← SpiderM.liftIO <| attached.subscribe fun pair =>
+      receivedRef.modify (· ++ [pair])
+
+    SpiderM.liftIO <| trigger "hello"
+    SpiderM.liftIO <| trigger "world"
+    SpiderM.liftIO receivedRef.get
+  shouldBe result [(42, "hello"), (42, "world")]
+
+test "Event.attachWithM applies function to behavior and event" := do
+  let result ← runSpider do
+    let (event, trigger) ← newTriggerEvent (t := Spider) (a := Nat)
+    let multiplierBehavior := Behavior.constant 10
+    let attached ← Event.attachWithM (· * ·) multiplierBehavior event
+
+    let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
+    let _ ← SpiderM.liftIO <| attached.subscribe fun n =>
+      receivedRef.modify (· ++ [n])
+
+    SpiderM.liftIO <| trigger 1
+    SpiderM.liftIO <| trigger 2
+    SpiderM.liftIO <| trigger 3
+    SpiderM.liftIO receivedRef.get
+  shouldBe result [10, 20, 30]
+
+test "Event.fanEitherM splits Sum event into two" := do
+  let result ← runSpider do
+    let (event, trigger) ← newTriggerEvent (t := Spider) (a := Sum Nat String)
+    let (leftEvent, rightEvent) ← Event.fanEitherM event
+
+    let leftRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
+    let rightRef ← SpiderM.liftIO <| IO.mkRef ([] : List String)
+    let _ ← SpiderM.liftIO <| leftEvent.subscribe fun n =>
+      leftRef.modify (· ++ [n])
+    let _ ← SpiderM.liftIO <| rightEvent.subscribe fun s =>
+      rightRef.modify (· ++ [s])
+
+    SpiderM.liftIO <| trigger (Sum.inl 1)
+    SpiderM.liftIO <| trigger (Sum.inr "hello")
+    SpiderM.liftIO <| trigger (Sum.inl 2)
+    SpiderM.liftIO <| trigger (Sum.inr "world")
+
+    let left ← SpiderM.liftIO leftRef.get
+    let right ← SpiderM.liftIO rightRef.get
+    pure (left, right)
+  shouldBe result ([1, 2], ["hello", "world"])
+
+test "Event.accumulateM maintains running state" := do
+  let result ← runSpider do
+    let (event, trigger) ← newTriggerEvent (t := Spider) (a := Nat)
+    let accumulated ← Event.accumulateM (· + ·) 100 event
+
+    let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
+    let _ ← SpiderM.liftIO <| accumulated.subscribe fun n =>
+      receivedRef.modify (· ++ [n])
+
+    SpiderM.liftIO <| trigger 1   -- 100 + 1 = 101
+    SpiderM.liftIO <| trigger 2   -- 101 + 2 = 103
+    SpiderM.liftIO <| trigger 10  -- 103 + 10 = 113
+    SpiderM.liftIO receivedRef.get
+  shouldBe result [101, 103, 113]
+
+test "Event.mergeListM with empty list returns never event" := do
+  let result ← runSpider do
+    let merged ← Event.mergeListM ([] : List (Event Spider Nat))
+    let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List (List Nat))
+    let _ ← SpiderM.liftIO <| merged.subscribe fun ns =>
+      receivedRef.modify (· ++ [ns])
+    -- Nothing to fire, so should be empty
+    SpiderM.liftIO receivedRef.get
+  shouldBe result []
+
+test "Event.leftmostM with empty list returns never event" := do
+  let result ← runSpider do
+    let first ← Event.leftmostM ([] : List (Event Spider Nat))
+    let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
+    let _ ← SpiderM.liftIO <| first.subscribe fun n =>
+      receivedRef.modify (· ++ [n])
+    -- Nothing to fire, so should be empty
+    SpiderM.liftIO receivedRef.get
+  shouldBe result []
+
+test "rapid event firing preserves order" := do
+  let result ← runSpider do
+    let (event, trigger) ← newTriggerEvent (t := Spider) (a := Nat)
+    let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
+    let _ ← SpiderM.liftIO <| event.subscribe fun n =>
+      receivedRef.modify (· ++ [n])
+
+    -- Fire many events rapidly
+    for i in [0:100] do
+      SpiderM.liftIO <| trigger i
+    SpiderM.liftIO receivedRef.get
+  shouldBe result (List.range 100)
+
+test "Event.attachM tracks dynamic behavior changes" := do
+  let result ← runSpider do
+    let (event, trigger) ← newTriggerEvent (t := Spider) (a := String)
+    let (countEvent, countFire) ← newTriggerEvent (t := Spider) (a := Nat)
+    let counterDyn ← holdDyn 0 countEvent
+    let attached ← Event.attachM counterDyn.current event
+
+    let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List (Nat × String))
+    let _ ← SpiderM.liftIO <| attached.subscribe fun pair =>
+      receivedRef.modify (· ++ [pair])
+
+    SpiderM.liftIO <| trigger "a"
+    SpiderM.liftIO <| countFire 10
+    SpiderM.liftIO <| trigger "b"
+    SpiderM.liftIO <| countFire 20
+    SpiderM.liftIO <| trigger "c"
+    SpiderM.liftIO receivedRef.get
+  shouldBe result [(0, "a"), (10, "b"), (20, "c")]
+
 #generate_tests
 
 end ReactiveTests.EventTests
