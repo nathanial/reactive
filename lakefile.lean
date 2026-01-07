@@ -4,7 +4,7 @@ open Lake DSL
 package reactive where
   version := v!"0.1.0"
 
-require crucible from git "https://github.com/nathanial/crucible" @ "v0.0.1"
+require crucible from git "https://github.com/nathanial/crucible" @ "v0.0.3"
 require plausible from git
   "https://github.com/leanprover-community/plausible.git" @ "v4.26.0"
 require chronos from git "https://github.com/nathanial/chronos-lean" @ "v0.0.2"
