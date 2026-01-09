@@ -5,3 +5,4 @@
 -/
 import Reactive.Proofs.BehaviorLaws
 import Reactive.Proofs.CombinatorLaws
+import Reactive.Proofs.PropagationLaws
