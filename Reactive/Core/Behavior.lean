@@ -83,7 +83,7 @@ def zip (ba : Behavior t a) (bb : Behavior t b) : Behavior t (a × b) :=
 -/
 def hold [Timeline t] (initial : a) (event : Event t a) : IO (Behavior t a) := do
   let valueRef ← IO.mkRef initial
-  let _ ← event.subscribe fun a => valueRef.set a
+  let _ ← Reactive.Event.subscribe event fun a => valueRef.set a
   Pure.pure (Behavior.fromSample valueRef.get)
 
 /-- Create a behavior by folding over event occurrences.
@@ -98,7 +98,7 @@ def hold [Timeline t] (initial : a) (event : Event t a) : IO (Behavior t a) := d
 -/
 def foldB [Timeline t] (f : a → b → b) (initial : b) (event : Event t a) : IO (Behavior t b) := do
   let valueRef ← IO.mkRef initial
-  let _ ← event.subscribe fun a => do
+  let _ ← Reactive.Event.subscribe event fun a => do
     let old ← valueRef.get
     valueRef.set (f a old)
   Pure.pure (Behavior.fromSample valueRef.get)

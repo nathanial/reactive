@@ -14,7 +14,7 @@ namespace Event
     On each event occurrence, samples the behavior and returns that value. -/
 def tagWithId [Timeline t] (beh : Behavior t a) (e : Event t b) (nodeId : NodeId) : IO (Event t a) := do
   let derived ← Event.newNodeWithId nodeId (e.height.inc)
-  let _ ← e.subscribe fun _ => do
+  let _ ← Reactive.Event.subscribe e fun _ => do
     let v ← beh.sample
     derived.fire v
   pure derived
@@ -29,7 +29,7 @@ def tag [Timeline t] (ctx : TimelineCtx t) (beh : Behavior t a) (e : Event t b) 
 /-- Attach the current behavior value to each event occurrence (with explicit NodeId). -/
 def attachWithId [Timeline t] (b : Behavior t a) (e : Event t c) (nodeId : NodeId) : IO (Event t (a × c)) := do
   let derived ← Event.newNodeWithId nodeId (e.height.inc)
-  let _ ← e.subscribe fun c => do
+  let _ ← Reactive.Event.subscribe e fun c => do
     let a ← b.sample
     derived.fire (a, c)
   pure derived
@@ -44,7 +44,7 @@ def attach [Timeline t] (ctx : TimelineCtx t) (b : Behavior t a) (e : Event t c)
 def attachWithFnId [Timeline t] (f : a → c → d) (b : Behavior t a) (e : Event t c)
     (nodeId : NodeId) : IO (Event t d) := do
   let derived ← Event.newNodeWithId nodeId (e.height.inc)
-  let _ ← e.subscribe fun c => do
+  let _ ← Reactive.Event.subscribe e fun c => do
     let a ← b.sample
     derived.fire (f a c)
   pure derived
@@ -59,7 +59,7 @@ def attachWith [Timeline t] (ctx : TimelineCtx t) (f : a → c → d) (b : Behav
     Only fires when the behavior is true. -/
 def gateWithId [Timeline t] (beh : Behavior t Bool) (e : Event t a) (nodeId : NodeId) : IO (Event t a) := do
   let derived ← Event.newNodeWithId nodeId (e.height.inc)
-  let _ ← e.subscribe fun a => do
+  let _ ← Reactive.Event.subscribe e fun a => do
     let isOpen ← beh.sample
     if isOpen then derived.fire a else pure ()
   pure derived
@@ -84,7 +84,7 @@ def mergeListWithId [Timeline t] (events : List (Event t a)) (nodeId : NodeId) :
   let flushScheduledRef ← IO.mkRef false
 
   for e in events do
-    let _ ← e.subscribe fun a => do
+    let _ ← Reactive.Event.subscribe e fun a => do
       -- Add value to buffer
       bufferRef.modify (· ++ [a])
 
@@ -130,7 +130,7 @@ def leftmostWithId [Timeline t] (events : List (Event t a)) (nodeId : NodeId) : 
   let derived ← Event.newNodeWithId nodeId (maxHeight.inc)
 
   for e in events do
-    let _ ← e.subscribe derived.fire
+    let _ ← Reactive.Event.subscribe e derived.fire
 
   pure derived
 
@@ -146,7 +146,7 @@ def fanEitherWithId [Timeline t] (e : Event t (Sum a b)) (nodeIdL : NodeId) (nod
     : IO (Event t a × Event t b) := do
   let leftEvent ← Event.newNodeWithId nodeIdL (e.height.inc)
   let rightEvent ← Event.newNodeWithId nodeIdR (e.height.inc)
-  let _ ← e.subscribe fun ab =>
+  let _ ← Reactive.Event.subscribe e fun ab =>
     match ab with
     | .inl a => leftEvent.fire a
     | .inr b => rightEvent.fire b
@@ -168,7 +168,7 @@ def fanEither [Timeline t] (ctx : TimelineCtx t) (e : Event t (Sum a b)) : IO (E
     This uses the nextFramePending queue in PropagationQueue. -/
 def delayFrameWithId [Timeline t] (e : Event t a) (nodeId : NodeId) : IO (Event t a) := do
   let derived ← Event.newNodeWithId nodeId (e.height.inc)
-  let _ ← e.subscribe fun a => do
+  let _ ← Reactive.Event.subscribe e fun a => do
     match ← getPropagationContext with
     | some queueRef =>
       let q ← queueRef.get
@@ -195,7 +195,7 @@ abbrev delay := @delayFrameWithId
 def takeNWithId [Timeline t] (n : Nat) (e : Event t a) (nodeId : NodeId) : IO (Event t a) := do
   let countRef ← IO.mkRef 0
   let derived ← Event.newNodeWithId nodeId (e.height.inc)
-  let _ ← e.subscribe fun a => do
+  let _ ← Reactive.Event.subscribe e fun a => do
     let count ← countRef.get
     if count < n then
       countRef.set (count + 1)
@@ -212,7 +212,7 @@ def takeN [Timeline t] (ctx : TimelineCtx t) (n : Nat) (e : Event t a) : IO (Eve
 def dropNWithId [Timeline t] (n : Nat) (e : Event t a) (nodeId : NodeId) : IO (Event t a) := do
   let countRef ← IO.mkRef 0
   let derived ← Event.newNodeWithId nodeId (e.height.inc)
-  let _ ← e.subscribe fun a => do
+  let _ ← Reactive.Event.subscribe e fun a => do
     let count ← countRef.get
     countRef.set (count + 1)
     if count >= n then
@@ -231,7 +231,7 @@ def accumulateWithId [Timeline t] (f : a → b → b) (initial : b) (e : Event t
     (nodeId : NodeId) : IO (Event t b) := do
   let stateRef ← IO.mkRef initial
   let derived ← Event.newNodeWithId nodeId (e.height.inc)
-  let _ ← e.subscribe fun a => do
+  let _ ← Reactive.Event.subscribe e fun a => do
     let old ← stateRef.get
     let new := f a old
     stateRef.set new

@@ -79,7 +79,7 @@ def mapWithId [Timeline t] [BEq b] (f : a → b) (da : Dynamic t a) (nodeId : No
   let valueRef ← IO.mkRef initialMapped
   let (changeEvent, trigger) ← Event.newTriggerWithId nodeId
   -- Subscribe to source changes and only fire if mapped value changed
-  let _ ← da.changeEvent.subscribe fun newA => do
+  let _ ← Reactive.Event.subscribe da.changeEvent fun newA => do
     let newB := f newA
     let oldB ← valueRef.get
     if newB != oldB then
@@ -105,7 +105,7 @@ def zipWithId [Timeline t] [BEq c] (f : a → b → c) (da : Dynamic t a) (db : 
   let (changeEvent, trigger) ← Event.newTriggerWithId nodeId
 
   -- Subscribe to changes in da
-  let _ ← da.changeEvent.subscribe fun newA => do
+  let _ ← Reactive.Event.subscribe da.changeEvent fun newA => do
     let currentB ← db.sample
     let newC := f newA currentB
     let oldC ← valueRef.get
@@ -114,7 +114,7 @@ def zipWithId [Timeline t] [BEq c] (f : a → b → c) (da : Dynamic t a) (db : 
       trigger newC
 
   -- Subscribe to changes in db
-  let _ ← db.changeEvent.subscribe fun newB => do
+  let _ ← Reactive.Event.subscribe db.changeEvent fun newB => do
     let currentA ← da.sample
     let newC := f currentA newB
     let oldC ← valueRef.get
@@ -144,7 +144,7 @@ def zip [Timeline t] [BEq a] [BEq b] (ctx : TimelineCtx t) (da : Dynamic t a) (d
 def holdWithId [Timeline t] (initial : a) (event : Event t a) (nodeId : NodeId) : IO (Dynamic t a) := do
   let valueRef ← IO.mkRef initial
   let (changeEvent, trigger) ← Event.newTriggerWithId nodeId
-  let _ ← event.subscribe fun a => do
+  let _ ← Reactive.Event.subscribe event fun a => do
     valueRef.set a
     trigger a
   pure ⟨valueRef, changeEvent, trigger⟩
@@ -160,7 +160,7 @@ def foldDynWithId [Timeline t] (f : a → b → b) (initial : b) (event : Event 
     (nodeId : NodeId) : IO (Dynamic t b) := do
   let valueRef ← IO.mkRef initial
   let (changeEvent, trigger) ← Event.newTriggerWithId nodeId
-  let _ ← event.subscribe fun a => do
+  let _ ← Reactive.Event.subscribe event fun a => do
     let old ← valueRef.get
     let new := f a old
     valueRef.set new

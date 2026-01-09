@@ -168,6 +168,11 @@ def newTriggerWithId [Timeline t] (nodeId : NodeId) : IO (Event t a × (a → IO
 /-- Subscribe to an event.
     Returns an unsubscribe action that removes this subscription.
 
+    WARNING: This is protected for internal use by combinators. Application code
+    should use pure FRP combinators like `foldDyn`, `holdDyn`, `mapM`, `filterM`,
+    `attachWith`, etc. instead of manual subscriptions. Manual subscribe can lead
+    to imperative patterns that break FRP semantics.
+
     Example:
     ```
     let unsub ← myEvent.subscribe fun value =>
@@ -175,15 +180,20 @@ def newTriggerWithId [Timeline t] (nodeId : NodeId) : IO (Event t a × (a → IO
     -- Later, to stop receiving events:
     unsub
     ``` -/
-def subscribe (e : Event t a) (callback : Subscriber a) : IO (IO Unit) :=
+protected def subscribe (e : Event t a) (callback : Subscriber a) : IO (IO Unit) :=
   e.node.subscribe callback
 
 /-- Subscribe with scope-based cleanup.
     The subscription is automatically unsubscribed when the scope is disposed.
 
+    WARNING: This is protected for internal use by combinators. Application code
+    should use pure FRP combinators like `foldDyn`, `holdDyn`, `mapM`, `filterM`,
+    `attachWith`, etc. instead of manual subscriptions. Manual subscribe can lead
+    to imperative patterns that break FRP semantics.
+
     Prefer this over `subscribe` when working within a `SpiderM` context,
     as it ensures proper cleanup of subscriptions. -/
-def subscribeScoped (e : Event t a) (scope : SubscriptionScope)
+protected def subscribeScoped (e : Event t a) (scope : SubscriptionScope)
     (callback : Subscriber a) : IO (IO Unit) := do
   let unsub ← e.node.subscribe callback
   scope.register unsub
@@ -207,7 +217,7 @@ def nodeId (e : Event t a) : NodeId :=
 private def deriveWithId [Timeline t] (source : Event t a) (derivedNodeId : NodeId)
     (handler : a → (b → IO Unit) → IO Unit) : IO (Event t b) := do
   let derived ← Event.newNodeWithId derivedNodeId (source.height.inc)
-  let _ ← source.subscribe fun a => handler a derived.fire
+  let _ ← Reactive.Event.subscribe source fun a => handler a derived.fire
   pure derived
 
 /-- Helper to create a derived event from a source event.
@@ -283,8 +293,8 @@ def mapMaybe [Timeline t] (ctx : TimelineCtx t) (f : a → Option b) (source : E
 def mergeWithId [Timeline t] (e1 : Event t a) (e2 : Event t a) (derivedNodeId : NodeId) : IO (Event t a) := do
   let height := Height.inc (max e1.height e2.height)
   let derived ← Event.newNodeWithId derivedNodeId height
-  let _ ← e1.subscribe derived.fire
-  let _ ← e2.subscribe derived.fire
+  let _ ← Reactive.Event.subscribe e1 derived.fire
+  let _ ← Reactive.Event.subscribe e2 derived.fire
   pure derived
 
 /-- Merge two events into one.

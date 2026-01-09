@@ -15,16 +15,16 @@ def switchDynWithId [Timeline t] (de : Dynamic t (Event t a)) (nodeId : NodeId) 
 
   -- Subscribe to the initial event
   let initialEvent ← de.sample
-  let unsub ← initialEvent.subscribe derived.fire
+  let unsub ← Reactive.Event.subscribe initialEvent derived.fire
   currentUnsubRef.set unsub
 
   -- When the dynamic changes, switch to the new event
-  let _ ← de.updated.subscribe fun newEvent => do
+  let _ ← Reactive.Event.subscribe de.updated fun newEvent => do
     -- Unsubscribe from old event
     let oldUnsub ← currentUnsubRef.get
     oldUnsub
     -- Subscribe to new event
-    let unsub ← newEvent.subscribe derived.fire
+    let unsub ← Reactive.Event.subscribe newEvent derived.fire
     currentUnsubRef.set unsub
 
   pure derived
@@ -59,7 +59,7 @@ def switchDynamicWithId [Timeline t] (dd : Dynamic t (Dynamic t a)) (nodeId : No
     let oldUnsub ← currentUnsubRef.get
     oldUnsub
     -- Subscribe to new inner's changes
-    let unsub ← inner.updated.subscribe fun newValue => do
+    let unsub ← Reactive.Event.subscribe inner.updated fun newValue => do
       updateResult newValue
     currentUnsubRef.set unsub
     -- Update with current value of new inner
@@ -67,11 +67,11 @@ def switchDynamicWithId [Timeline t] (dd : Dynamic t (Dynamic t a)) (nodeId : No
     updateResult currentValue
 
   -- Subscribe to initial inner dynamic's changes
-  let unsub ← initialInner.updated.subscribe fun newValue => updateResult newValue
+  let unsub ← Reactive.Event.subscribe initialInner.updated fun newValue => updateResult newValue
   currentUnsubRef.set unsub
 
   -- When outer changes to new inner dynamic, resubscribe
-  let _ ← dd.updated.subscribe subscribeToInner
+  let _ ← Reactive.Event.subscribe dd.updated subscribeToInner
 
   pure result
 
@@ -91,14 +91,14 @@ def switchHoldWithId [Timeline t] (initial : Event t a) (updates : Event t (Even
   let currentUnsubRef ← IO.mkRef (pure () : IO Unit)
 
   -- Subscribe to initial
-  let unsub ← initial.subscribe derived.fire
+  let unsub ← Reactive.Event.subscribe initial derived.fire
   currentUnsubRef.set unsub
 
   -- On each update event, switch to the new event
-  let _ ← updates.subscribe fun newEvent => do
+  let _ ← Reactive.Event.subscribe updates fun newEvent => do
     let oldUnsub ← currentUnsubRef.get
     oldUnsub
-    let unsub ← newEvent.subscribe derived.fire
+    let unsub ← Reactive.Event.subscribe newEvent derived.fire
     currentUnsubRef.set unsub
 
   pure derived

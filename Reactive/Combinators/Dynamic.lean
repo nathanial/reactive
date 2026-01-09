@@ -55,7 +55,7 @@ def tagUpdated [Timeline t] (ctx : TimelineCtx t) (b : a) (d : Dynamic t c) : IO
 def changesId [Timeline t] (d : Dynamic t a) (nodeId : NodeId) : IO (Event t (a × a)) := do
   let oldRef ← IO.mkRef (← d.sample)
   let derived ← Event.newNodeWithId nodeId (d.updated.height.inc)
-  let _ ← d.updated.subscribe fun newVal => do
+  let _ ← Reactive.Event.subscribe d.updated fun newVal => do
     let oldVal ← oldRef.get
     oldRef.set newVal
     derived.fire (oldVal, newVal)
