@@ -510,6 +510,21 @@ def zipWith3' [BEq a] [BEq b] [BEq d] (da : Dynamic Spider a) (f : a → b → c
 def ap' [BEq b] (df : Dynamic Spider (a → b)) (da : Dynamic Spider a) : SpiderM (Dynamic Spider b) :=
   apM df da
 
+/-- Get an event that fires with (oldValue, newValue) pairs on each change.
+    Auto-allocates NodeId and registers subscription with current scope.
+
+    This is useful for detecting changes in a Dynamic's value, e.g., to
+    determine when a component gains or loses focus.
+
+    Example:
+    ```
+    let focusChanges ← Dynamic.changesM focusDynamic
+    let gainFocus ← Event.filterM (fun (old, new) => !old && new) focusChanges
+    ```
+-/
+def changesM (d : Dynamic Spider a) : SpiderM (Event Spider (a × a)) := ⟨fun env => do
+  Dynamic.changesId d (← env.timelineCtx.freshNodeId)⟩
+
 end Dynamic
 
 /-! ## Behavior SpiderM Combinators
@@ -1043,6 +1058,44 @@ def fromIO (poll : IO (Option a)) : SpiderM (Event Spider a × IO Unit) := do
 def toCallback (event : Event Spider a) (callback : a → IO Unit) : SpiderM Unit := do
   let _ ← Event.subscribeM event callback
   pure ()
+
+/-- Run IO actions from an event and return an event of results.
+    This is the core pattern for performing effects in response to FRP events.
+
+    The IO action is executed synchronously when the source event fires,
+    and the resulting event fires with the action's result.
+    Subscription is registered with current scope for automatic cleanup.
+
+    Example:
+    ```
+    -- Save to file whenever document changes
+    let saveResults ← performEvent (saveEvent.map' fun doc => saveDocument doc)
+    -- saveResults fires with the save success/failure after each save
+    ```
+-/
+def performEvent (event : Event Spider (IO a)) : SpiderM (Event Spider a) := ⟨fun env => do
+  let nodeId ← env.timelineCtx.freshNodeId
+  let derived ← Event.newNodeWithId nodeId event.height.inc
+  let unsub ← Reactive.Event.subscribe event fun action => do
+    let result ← action
+    derived.fire result
+  env.currentScope.register unsub
+  pure derived⟩
+
+/-- Run IO actions from an event, discarding results.
+    Use this when you only care about the side effect, not the result.
+    Subscription is registered with current scope for automatic cleanup.
+
+    Example:
+    ```
+    -- Log every button click
+    let logEvents ← clickEvent.map' fun _ => IO.println "Button clicked!"
+    performEvent_ logEvents
+    ```
+-/
+def performEvent_ (event : Event Spider (IO Unit)) : SpiderM Unit := ⟨fun env => do
+  let unsub ← Reactive.Event.subscribe event fun action => action
+  env.currentScope.register unsub⟩
 
 /-- Create an event from an IO.Ref.
     Returns an event that fires whenever the ref is modified, plus a function
