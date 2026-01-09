@@ -149,6 +149,19 @@ axiom IO.map_eq_pure_bind : ∀ {α β : Type} (f : α → β) (x : IO α),
 axiom IO.seq_eq_bind : ∀ {α β : Type} (mf : IO (α → β)) (ma : IO α),
   mf <*> ma = mf >>= (fun f => ma >>= (fun a => _root_.Pure.pure (f a)))
 
+-- Bridge lemmas: EST.pure/EST.bind are the implementations of Pure.pure/Bind.bind for IO
+-- These are definitionally equal but stated explicitly for simp
+theorem IO.EST_pure_eq_pure : ∀ {α : Type} (a : α), (EST.pure a : IO α) = _root_.Pure.pure a := fun _ => rfl
+theorem IO.EST_bind_eq_bind : ∀ {α β : Type} (x : IO α) (f : α → IO β), EST.bind x f = x >>= f := fun _ _ => rfl
+
+-- Monad laws restated for EST operations (for simp to use with do-notation)
+theorem IO.EST_pure_bind : ∀ {α β : Type} (a : α) (f : α → IO β),
+    EST.bind (EST.pure a) f = f a := fun a f => IO.pure_bind a f
+theorem IO.EST_bind_pure : ∀ {α : Type} (x : IO α),
+    EST.bind x EST.pure = x := fun x => IO.bind_pure x
+theorem IO.EST_bind_assoc : ∀ {α β γ : Type} (x : IO α) (f : α → IO β) (g : β → IO γ),
+    EST.bind (EST.bind x f) g = EST.bind x (fun a => EST.bind (f a) g) := fun x f g => IO.bind_assoc x f g
+
 namespace Behavior
 
 /-- Extensionality: two behaviors are equal iff their sample IO actions are equal -/
@@ -280,6 +293,58 @@ instance {t : Type} : LawfulMonad (Behavior t) where
     rfl
   pure_bind := Behavior.pure_bind
   bind_assoc := Behavior.bind_assoc
+
+/-! ### Combinator Equivalences -/
+
+namespace Behavior
+
+/-- Helper: sampleIO of zipWith -/
+theorem sampleIO_zipWith {t : Type} {α β γ : Type}
+    (f : α → β → γ) (b1 : Behavior t α) (b2 : Behavior t β) :
+    (Behavior.zipWith f b1 b2).sampleIO =
+      (b1.sampleIO >>= fun a => b2.sampleIO >>= fun b => _root_.Pure.pure (f a b)) := rfl
+
+/-- zipWith is equivalent to applicative style: zipWith f b1 b2 = pure f <*> b1 <*> b2
+
+This shows that the zipWith combinator is internally consistent with
+Behavior's Applicative instance. -/
+theorem zipWith_eq_applicative {t : Type} {α β γ : Type}
+    (f : α → β → γ) (b1 : Behavior t α) (b2 : Behavior t β) :
+    Behavior.zipWith f b1 b2 = Behavior.pure f <*> b1 <*> b2 := by
+  apply Behavior.ext
+  show (Behavior.zipWith f b1 b2).sampleIO = (Behavior.pure f <*> b1 <*> b2).sampleIO
+  simp only [Behavior.zipWith, Behavior.fromSample]
+  simp only [Seq.seq, Behavior.ap, Pure.pure, Behavior.pure, Behavior.constant]
+  -- Goal is now:
+  -- LHS: EST.bind b1.sampleIO (fun a => EST.bind b2.sampleIO (fun b => EST.pure (f a b)))
+  -- RHS: EST.bind (EST.bind (EST.pure f) (fun f' => EST.bind b1.sampleIO (fun a => EST.pure (f' a))))
+  --              (fun fa => EST.bind b2.sampleIO (fun b => EST.pure (fa b)))
+  -- Step 1: Apply pure_bind to innermost (EST.pure f)
+  have step1 : EST.bind (EST.pure f) (fun f' => EST.bind b1.sampleIO (fun a => EST.pure (f' a))) =
+               EST.bind b1.sampleIO (fun a => EST.pure (f a)) := IO.EST_pure_bind f _
+  -- Step 2: Apply bind_assoc
+  have step2 : EST.bind (EST.bind b1.sampleIO (fun a => EST.pure (f a)))
+                        (fun fa => EST.bind b2.sampleIO (fun b => EST.pure (fa b))) =
+               EST.bind b1.sampleIO (fun a => EST.bind (EST.pure (f a))
+                        (fun fa => EST.bind b2.sampleIO (fun b => EST.pure (fa b)))) :=
+    IO.EST_bind_assoc _ _ _
+  -- Step 3: Apply pure_bind to inner (EST.pure (f a))
+  have step3 : ∀ a, EST.bind (EST.pure (f a)) (fun fa => EST.bind b2.sampleIO (fun b => EST.pure (fa b))) =
+                    EST.bind b2.sampleIO (fun b => EST.pure (f a b)) :=
+    fun a => IO.EST_pure_bind (f a) _
+  -- Combine
+  calc EST.bind b1.sampleIO (fun a => EST.bind b2.sampleIO (fun b => EST.pure (f a b)))
+      = EST.bind b1.sampleIO (fun a => EST.bind b2.sampleIO (fun b => EST.pure (f a b))) := rfl
+    _ = EST.bind b1.sampleIO (fun a => EST.bind (EST.pure (f a)) (fun fa => EST.bind b2.sampleIO (fun b => EST.pure (fa b)))) := by simp only [step3]
+    _ = EST.bind (EST.bind b1.sampleIO (fun a => EST.pure (f a))) (fun fa => EST.bind b2.sampleIO (fun b => EST.pure (fa b))) := step2.symm
+    _ = EST.bind (EST.bind (EST.pure f) (fun f' => EST.bind b1.sampleIO (fun a => EST.pure (f' a)))) (fun fa => EST.bind b2.sampleIO (fun b => EST.pure (fa b))) := by rw [step1]
+
+/-- zip is equivalent to zipWith Prod.mk -/
+theorem zip_eq_zipWith {t : Type} {α β : Type}
+    (b1 : Behavior t α) (b2 : Behavior t β) :
+    Behavior.zip b1 b2 = Behavior.zipWith Prod.mk b1 b2 := rfl
+
+end Behavior
 
 end Laws
 
