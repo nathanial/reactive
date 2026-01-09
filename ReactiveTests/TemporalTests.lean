@@ -92,6 +92,7 @@ test "delayDuration delays independently" := do
       receivedRef.modify (· ++ [n])
 
     SpiderM.liftIO <| fire 1
+    SpiderM.liftIO <| IO.sleep 5  -- Small delay to ensure first task is scheduled
     SpiderM.liftIO <| fire 2
     SpiderM.liftIO <| IO.sleep 100
     SpiderM.liftIO receivedRef.get
