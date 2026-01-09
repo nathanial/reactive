@@ -250,6 +250,98 @@ Implemented compile-time enforcement preventing mixing events from different tim
 
 ---
 
+## Known Usability Issues
+
+These issues were identified during real-world usage in the afferent-demos ReactiveShowcase application.
+
+### [Issue] subscribe/sample/set Pattern is Dangerous
+
+**Problem:** Sampling and updating the same Dynamic inside a subscription callback can cause crashes or unexpected behavior.
+
+```lean
+-- This pattern crashed with multiple buttons:
+for btn in buttons do
+  let _ ← btn.onClick.subscribe fun _ => do
+    let n ← counter.sample    -- sampling inside subscribe
+    setCounter (n + 1)        -- then setting
+
+-- Correct pattern - use foldDyn:
+let allClicks ← Event.mergeM btn1.onClick btn2.onClick
+let counter ← foldDyn (fun _ n => n + 1) 0 allClicks
+```
+
+**Root Cause:** The exact failure mode is unclear, but it appears related to the interaction between event propagation and dynamic updates during the same propagation frame.
+
+**Workaround:** Use `foldDyn` or other declarative combinators instead of imperative subscribe/sample/set patterns.
+
+---
+
+### [Issue] No Easy Way to Merge Multiple Events
+
+**Problem:** Merging more than 2 events requires chaining `mergeM` calls:
+
+```lean
+-- Current (verbose):
+let clicks12 ← Event.mergeM e1 e2
+let clicks123 ← Event.mergeM clicks12 e3
+let allClicks ← Event.mergeM clicks123 e4
+
+-- Desired:
+let allClicks ← Event.mergeMany #[e1, e2, e3, e4]
+```
+
+**Workaround:** Chain `mergeM` calls manually.
+
+**Proposed Fix:** Add `Event.mergeManyM : Array (Event t a) → SpiderM (Event t a)` combinator.
+
+---
+
+### [Issue] Circular Dependencies for Focus-like Patterns
+
+**Problem:** Proper FRP modeling of shared focus state requires circular dependencies:
+
+1. Components need to expose `onFocus : Event`
+2. App merges focus events: `focusedInput ← hold none (merge allFocusEvents)`
+3. Components need `focusedInput : Dynamic` to know when to handle keyboard
+
+This creates a circular dependency: components need `focusedInput` which depends on component events.
+
+**Current Workaround:** Use imperative `setFocusedInput` callback passed to components, with pragmatic `subscribe` usage.
+
+**Potential Fix:** The library has `fixDynM` for self-referential dynamics, but extending this pattern to multi-component scenarios is non-trivial. Consider adding `RecursiveDo`-style syntax support.
+
+---
+
+### [Issue] BEq Constraints Proliferate After Deduplication Fix
+
+**Problem:** The fix for Dynamic.mapM deduplication (only firing `.updated` when value actually changes) requires `BEq` constraints. These constraints cascade through the codebase.
+
+```lean
+-- Now requires BEq:
+def mapM [BEq b] (f : a → b) (da : Dynamic Spider a) : SpiderM (Dynamic Spider b)
+```
+
+**Impact:** Adding `BEq` constraints to complex types can be tedious. Some types may not have meaningful equality.
+
+**Workaround:** Derive `BEq` for structures, or use types with existing `BEq` instances.
+
+**Potential Fix:** Consider providing non-deduplicating variants (`mapM'` without dedup) for cases where it's not needed or `BEq` is unavailable.
+
+---
+
+### [Issue] Some subscribe Usage is Unavoidable
+
+**Problem:** For complex interactive widgets that need to both read state AND update it in response to events (like TextInput focus management), pure FRP patterns are awkward or impossible without circular dependency support.
+
+**Affected Patterns:**
+- Focus clearing when clicking outside text inputs
+- Keyboard routing based on current focus state
+- Complex state machines with multiple inputs
+
+**Current Approach:** Accept pragmatic `subscribe` usage for these cases, marked with TODO comments for future refactoring.
+
+---
+
 ## Feature Proposals
 
 ### [DONE] Proper delay Combinator Implementation
