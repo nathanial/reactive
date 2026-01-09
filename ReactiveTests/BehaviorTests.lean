@@ -169,6 +169,106 @@ test "Behavior.or combines two boolean behaviors" := do
   let value ← combined.sample
   shouldBe value true
 
+-- Direct tests for core combinators
+
+test "Behavior.fromSample creates behavior from IO action" := do
+  let counterRef ← IO.mkRef (0 : Nat)
+  let b : Behavior Spider Nat := Behavior.fromSample do
+    counterRef.modify (· + 1)
+    counterRef.get
+  -- Each sample should increment and return the new value
+  let v1 ← b.sample
+  let v2 ← b.sample
+  let v3 ← b.sample
+  shouldBe (v1, v2, v3) (1, 2, 3)
+
+test "Behavior.fromSample can read external state" := do
+  let stateRef ← IO.mkRef "initial"
+  let b : Behavior Spider String := Behavior.fromSample stateRef.get
+  let v1 ← b.sample
+  stateRef.set "updated"
+  let v2 ← b.sample
+  shouldBe (v1, v2) ("initial", "updated")
+
+test "Behavior.pure creates constant behavior" := do
+  let b : Behavior Spider Nat := Behavior.pure 42
+  let v1 ← b.sample
+  let v2 ← b.sample
+  shouldBe (v1, v2) (42, 42)
+
+test "Behavior.ap applies function behavior to value behavior" := do
+  let bf : Behavior Spider (Nat → Nat) := Behavior.constant (· * 2)
+  let ba : Behavior Spider Nat := Behavior.constant 21
+  let result := Behavior.ap bf ba
+  let value ← result.sample
+  shouldBe value 42
+
+test "Behavior.ap with changing function behavior" := do
+  let funcRef ← IO.mkRef (fun (n : Nat) => n + 1)
+  let bf : Behavior Spider (Nat → Nat) := Behavior.fromSample funcRef.get
+  let ba : Behavior Spider Nat := Behavior.constant 10
+  let result := Behavior.ap bf ba
+  let v1 ← result.sample
+  funcRef.set (· * 3)
+  let v2 ← result.sample
+  shouldBe (v1, v2) (11, 30)
+
+test "Behavior.apply is alias for ap" := do
+  let bf : Behavior Spider (Nat → Nat) := Behavior.constant (· + 5)
+  let ba : Behavior Spider Nat := Behavior.constant 10
+  let result := Behavior.apply bf ba
+  let value ← result.sample
+  shouldBe value 15
+
+test "Behavior.bind chains dependent behaviors" := do
+  let stateRef ← IO.mkRef (0 : Nat)
+  let outer : Behavior Spider Nat := Behavior.fromSample stateRef.get
+  let result := Behavior.bind outer fun n =>
+    Behavior.constant (n * 10)
+  stateRef.set 5
+  let v1 ← result.sample
+  stateRef.set 7
+  let v2 ← result.sample
+  shouldBe (v1, v2) (50, 70)
+
+test "Behavior.bind with nested behaviors" := do
+  let b1 : Behavior Spider Nat := Behavior.constant 10
+  let b2 : Behavior Spider Nat := Behavior.constant 20
+  let result := Behavior.bind b1 fun x =>
+    Behavior.bind b2 fun y =>
+      Behavior.constant (x + y)
+  let value ← result.sample
+  shouldBe value 30
+
+test "Behavior.zip pairs two behaviors" := do
+  let b1 : Behavior Spider Nat := Behavior.constant 1
+  let b2 : Behavior Spider String := Behavior.constant "hello"
+  let zipped := Behavior.zip b1 b2
+  let value ← zipped.sample
+  shouldBe value (1, "hello")
+
+test "Behavior.zip with dynamic values" := do
+  let ref1 ← IO.mkRef (10 : Nat)
+  let ref2 ← IO.mkRef (20 : Nat)
+  let b1 : Behavior Spider Nat := Behavior.fromSample ref1.get
+  let b2 : Behavior Spider Nat := Behavior.fromSample ref2.get
+  let zipped := Behavior.zip b1 b2
+  let v1 ← zipped.sample
+  ref1.set 100
+  ref2.set 200
+  let v2 ← zipped.sample
+  shouldBe (v1, v2) ((10, 20), (100, 200))
+
+test "Behavior allTrue with empty list returns true" := do
+  let result := Behavior.allTrue ([] : List (Behavior Spider Bool))
+  let value ← result.sample
+  shouldBe value true
+
+test "Behavior anyTrue with empty list returns false" := do
+  let result := Behavior.anyTrue ([] : List (Behavior Spider Bool))
+  let value ← result.sample
+  shouldBe value false
+
 #generate_tests
 
 end ReactiveTests.BehaviorTests

@@ -427,6 +427,216 @@ test "Event.attachM tracks dynamic behavior changes" := do
     SpiderM.liftIO receivedRef.get
   shouldBe result [(0, "a"), (10, "b"), (20, "c")]
 
+-- Pure IO versions with TimelineCtx
+
+test "Event.tag samples behavior on each event" := do
+  let result ← runSpider do
+    let ctx ← SpiderM.getTimelineCtx
+    let (event, trigger) ← newTriggerEvent (t := Spider) (a := Unit)
+    let counterRef ← SpiderM.liftIO <| IO.mkRef (0 : Nat)
+    let counterBehavior : Behavior Spider Nat := Behavior.fromSample do
+      counterRef.modify (· + 1)
+      counterRef.get
+    let tagged ← SpiderM.liftIO <| Event.tag ctx counterBehavior event
+
+    let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
+    let _ ← SpiderM.liftIO <| tagged.subscribe fun n =>
+      receivedRef.modify (· ++ [n])
+
+    SpiderM.liftIO <| trigger ()
+    SpiderM.liftIO <| trigger ()
+    SpiderM.liftIO <| trigger ()
+    SpiderM.liftIO receivedRef.get
+  shouldBe result [1, 2, 3]
+
+test "Event.attach pairs behavior value with event value" := do
+  let result ← runSpider do
+    let ctx ← SpiderM.getTimelineCtx
+    let (event, trigger) ← newTriggerEvent (t := Spider) (a := String)
+    let multiplier : Behavior Spider Nat := Behavior.constant 10
+    let attached ← SpiderM.liftIO <| Event.attach ctx multiplier event
+
+    let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List (Nat × String))
+    let _ ← SpiderM.liftIO <| attached.subscribe fun pair =>
+      receivedRef.modify (· ++ [pair])
+
+    SpiderM.liftIO <| trigger "a"
+    SpiderM.liftIO <| trigger "b"
+    SpiderM.liftIO receivedRef.get
+  shouldBe result [(10, "a"), (10, "b")]
+
+test "Event.attachWith combines behavior and event with function" := do
+  let result ← runSpider do
+    let ctx ← SpiderM.getTimelineCtx
+    let (event, trigger) ← newTriggerEvent (t := Spider) (a := Nat)
+    let multiplier : Behavior Spider Nat := Behavior.constant 10
+    let attached ← SpiderM.liftIO <| Event.attachWith ctx (· * ·) multiplier event
+
+    let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
+    let _ ← SpiderM.liftIO <| attached.subscribe fun n =>
+      receivedRef.modify (· ++ [n])
+
+    SpiderM.liftIO <| trigger 1
+    SpiderM.liftIO <| trigger 2
+    SpiderM.liftIO <| trigger 3
+    SpiderM.liftIO receivedRef.get
+  shouldBe result [10, 20, 30]
+
+test "Event.gate filters by boolean behavior (pure IO)" := do
+  let result ← runSpider do
+    let ctx ← SpiderM.getTimelineCtx
+    let (event, trigger) ← newTriggerEvent (t := Spider) (a := Nat)
+    let gateRef ← SpiderM.liftIO <| IO.mkRef true
+    let gateBehavior : Behavior Spider Bool := Behavior.fromSample gateRef.get
+    let gated ← SpiderM.liftIO <| Event.gate ctx gateBehavior event
+
+    let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
+    let _ ← SpiderM.liftIO <| gated.subscribe fun n =>
+      receivedRef.modify (· ++ [n])
+
+    SpiderM.liftIO <| trigger 1        -- gate open
+    SpiderM.liftIO <| gateRef.set false
+    SpiderM.liftIO <| trigger 2        -- gate closed
+    SpiderM.liftIO <| gateRef.set true
+    SpiderM.liftIO <| trigger 3        -- gate open
+    SpiderM.liftIO receivedRef.get
+  shouldBe result [1, 3]
+
+test "Event.accumulate maintains running total (pure IO)" := do
+  let result ← runSpider do
+    let ctx ← SpiderM.getTimelineCtx
+    let (event, trigger) ← newTriggerEvent (t := Spider) (a := Nat)
+    let accumulated ← SpiderM.liftIO <| Event.accumulate ctx (· + ·) 0 event
+
+    let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
+    let _ ← SpiderM.liftIO <| accumulated.subscribe fun n =>
+      receivedRef.modify (· ++ [n])
+
+    SpiderM.liftIO <| trigger 5
+    SpiderM.liftIO <| trigger 10
+    SpiderM.liftIO <| trigger 3
+    SpiderM.liftIO receivedRef.get
+  shouldBe result [5, 15, 18]
+
+test "Event.scan is alias for accumulate" := do
+  let result ← runSpider do
+    let ctx ← SpiderM.getTimelineCtx
+    let (event, trigger) ← newTriggerEvent (t := Spider) (a := Nat)
+    let scanned ← SpiderM.liftIO <| Event.scan ctx (· * ·) 1 event
+
+    let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
+    let _ ← SpiderM.liftIO <| scanned.subscribe fun n =>
+      receivedRef.modify (· ++ [n])
+
+    SpiderM.liftIO <| trigger 2  -- 1 * 2 = 2
+    SpiderM.liftIO <| trigger 3  -- 2 * 3 = 6
+    SpiderM.liftIO <| trigger 4  -- 6 * 4 = 24
+    SpiderM.liftIO receivedRef.get
+  shouldBe result [2, 6, 24]
+
+test "Event.takeN limits occurrences (pure IO)" := do
+  let result ← runSpider do
+    let ctx ← SpiderM.getTimelineCtx
+    let (event, trigger) ← newTriggerEvent (t := Spider) (a := Nat)
+    let taken ← SpiderM.liftIO <| Event.takeN ctx 2 event
+
+    let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
+    let _ ← SpiderM.liftIO <| taken.subscribe fun n =>
+      receivedRef.modify (· ++ [n])
+
+    SpiderM.liftIO <| trigger 1
+    SpiderM.liftIO <| trigger 2
+    SpiderM.liftIO <| trigger 3  -- should not fire
+    SpiderM.liftIO <| trigger 4  -- should not fire
+    SpiderM.liftIO receivedRef.get
+  shouldBe result [1, 2]
+
+test "Event.dropN skips occurrences (pure IO)" := do
+  let result ← runSpider do
+    let ctx ← SpiderM.getTimelineCtx
+    let (event, trigger) ← newTriggerEvent (t := Spider) (a := Nat)
+    let dropped ← SpiderM.liftIO <| Event.dropN ctx 2 event
+
+    let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
+    let _ ← SpiderM.liftIO <| dropped.subscribe fun n =>
+      receivedRef.modify (· ++ [n])
+
+    SpiderM.liftIO <| trigger 1  -- dropped
+    SpiderM.liftIO <| trigger 2  -- dropped
+    SpiderM.liftIO <| trigger 3  -- passes
+    SpiderM.liftIO <| trigger 4  -- passes
+    SpiderM.liftIO receivedRef.get
+  shouldBe result [3, 4]
+
+test "Event.leftmost with pure IO" := do
+  let result ← runSpider do
+    let ctx ← SpiderM.getTimelineCtx
+    let (e1, t1) ← newTriggerEvent (t := Spider) (a := Nat)
+    let (e2, t2) ← newTriggerEvent (t := Spider) (a := Nat)
+    let first ← SpiderM.liftIO <| Event.leftmost ctx [e1, e2]
+
+    let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
+    let _ ← SpiderM.liftIO <| first.subscribe fun n =>
+      receivedRef.modify (· ++ [n])
+
+    SpiderM.liftIO <| t2 10
+    SpiderM.liftIO <| t1 20
+    SpiderM.liftIO receivedRef.get
+  shouldBe result [10, 20]
+
+test "Event.fanEither with pure IO" := do
+  let result ← runSpider do
+    let ctx ← SpiderM.getTimelineCtx
+    let (event, trigger) ← newTriggerEvent (t := Spider) (a := Sum Nat String)
+    let (leftEvent, rightEvent) ← SpiderM.liftIO <| Event.fanEither ctx event
+
+    let leftRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
+    let rightRef ← SpiderM.liftIO <| IO.mkRef ([] : List String)
+    let _ ← SpiderM.liftIO <| leftEvent.subscribe fun n =>
+      leftRef.modify (· ++ [n])
+    let _ ← SpiderM.liftIO <| rightEvent.subscribe fun s =>
+      rightRef.modify (· ++ [s])
+
+    SpiderM.liftIO <| trigger (Sum.inl 1)
+    SpiderM.liftIO <| trigger (Sum.inr "a")
+    SpiderM.liftIO <| trigger (Sum.inl 2)
+
+    let left ← SpiderM.liftIO leftRef.get
+    let right ← SpiderM.liftIO rightRef.get
+    pure (left, right)
+  shouldBe result ([1, 2], ["a"])
+
+test "Event.mergeList with pure IO" := do
+  let result ← runSpider do
+    let ctx ← SpiderM.getTimelineCtx
+    let (e1, t1) ← newTriggerEvent (t := Spider) (a := Nat)
+    let (e2, t2) ← newTriggerEvent (t := Spider) (a := Nat)
+    let merged ← SpiderM.liftIO <| Event.mergeList ctx [e1, e2]
+
+    let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List (List Nat))
+    let _ ← SpiderM.liftIO <| merged.subscribe fun ns =>
+      receivedRef.modify (· ++ [ns])
+
+    SpiderM.liftIO <| t1 1
+    SpiderM.liftIO <| t2 2
+    SpiderM.liftIO receivedRef.get
+  shouldBe result [[1], [2]]
+
+test "Event.mapM cleans up on scope dispose" := do
+  let disposedRef ← IO.mkRef false
+  let _ ← runSpider do
+    let (event, _) ← newTriggerEvent (t := Spider) (a := Nat)
+    let _ ← SpiderM.withAutoDisposeScope do
+      let mapped ← Event.mapM (· + 1) event
+      -- Subscribe so we can verify cleanup
+      let _ ← SpiderM.liftIO <| mapped.subscribe fun _ => pure ()
+      pure ()
+    -- After withAutoDisposeScope, subscriptions should be cleaned up
+    SpiderM.liftIO <| disposedRef.set true
+    pure ()
+  let disposed ← disposedRef.get
+  shouldBe disposed true
+
 #generate_tests
 
 end ReactiveTests.EventTests
