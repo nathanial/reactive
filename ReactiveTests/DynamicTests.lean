@@ -257,6 +257,85 @@ test "Dynamic.zip pairs two dynamics" := do
     pure (v0, v1, v2)
   shouldBe result ((10, "hello"), (20, "hello"), (20, "world"))
 
+test "Multiple Dynamic.mapM from same source" := do
+  -- Test case: Two derived dynamics from the same source Dynamic
+  -- This simulates the pattern used in TextInput components sharing focusedInput
+  let result ← runSpider do
+    let ctx ← SpiderM.getTimelineCtx
+    -- Create a source dynamic (like focusedInput : Dynamic Spider (Option String))
+    let (source, setSource) ← SpiderM.liftIO <| Dynamic.new ctx (none : Option String)
+
+    -- Create TWO derived dynamics from the same source (like two TextInputs)
+    -- Each checks if the source equals their own name
+    let derived1 ← Dynamic.mapM (· == some "input1") source
+    let derived2 ← Dynamic.mapM (· == some "input2") source
+
+    -- Initial state: both should be false
+    let v1_0 ← SpiderM.liftIO <| derived1.sample
+    let v2_0 ← SpiderM.liftIO <| derived2.sample
+
+    -- Set focus to input1
+    SpiderM.liftIO <| setSource (some "input1")
+    let v1_1 ← SpiderM.liftIO <| derived1.sample
+    let v2_1 ← SpiderM.liftIO <| derived2.sample
+
+    -- Set focus to input2
+    SpiderM.liftIO <| setSource (some "input2")
+    let v1_2 ← SpiderM.liftIO <| derived1.sample
+    let v2_2 ← SpiderM.liftIO <| derived2.sample
+
+    -- Clear focus
+    SpiderM.liftIO <| setSource none
+    let v1_3 ← SpiderM.liftIO <| derived1.sample
+    let v2_3 ← SpiderM.liftIO <| derived2.sample
+
+    pure ((v1_0, v2_0), (v1_1, v2_1), (v1_2, v2_2), (v1_3, v2_3))
+
+  -- Expected: derived1 is true only when source == some "input1"
+  --           derived2 is true only when source == some "input2"
+  shouldBe result (
+    (false, false),  -- initial: none
+    (true, false),   -- focus input1
+    (false, true),   -- focus input2
+    (false, false)   -- cleared
+  )
+
+test "Multiple Dynamic.mapM with subscriptions" := do
+  -- More complex test: multiple derived dynamics with subscriptions
+  -- This more closely matches the TextInput crash scenario
+  let result ← runSpider do
+    let ctx ← SpiderM.getTimelineCtx
+    let (source, setSource) ← SpiderM.liftIO <| Dynamic.new ctx (none : Option String)
+
+    -- Create derived dynamics
+    let derived1 ← Dynamic.mapM (· == some "input1") source
+    let derived2 ← Dynamic.mapM (· == some "input2") source
+
+    -- Subscribe to updates on both derived dynamics
+    let updates1 ← SpiderM.liftIO <| IO.mkRef ([] : List Bool)
+    let updates2 ← SpiderM.liftIO <| IO.mkRef ([] : List Bool)
+
+    let _ ← SpiderM.liftIO <| derived1.updated.subscribe fun b =>
+      updates1.modify (· ++ [b])
+    let _ ← SpiderM.liftIO <| derived2.updated.subscribe fun b =>
+      updates2.modify (· ++ [b])
+
+    -- Trigger updates
+    SpiderM.liftIO <| setSource (some "input1")
+    SpiderM.liftIO <| setSource (some "input2")
+    SpiderM.liftIO <| setSource none
+
+    let u1 ← SpiderM.liftIO <| updates1.get
+    let u2 ← SpiderM.liftIO <| updates2.get
+    pure (u1, u2)
+
+  -- derived1 updates: false→true (input1), true→false (input2), stays false (none)
+  -- derived2 updates: false→false (input1, no change), false→true (input2), true→false (none)
+  shouldBe result (
+    [true, false],      -- derived1: became true, then false
+    [true, false]       -- derived2: became true, then false
+  )
+
 #generate_tests
 
 end ReactiveTests.DynamicTests

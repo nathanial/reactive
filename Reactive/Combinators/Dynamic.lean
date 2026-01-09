@@ -18,14 +18,14 @@ def toBehavior (d : Dynamic t a) : Behavior t a :=
   d.current
 
 /-- Combine three dynamics (with explicit NodeIds). -/
-def zipWith3Id [Timeline t] (f : a → b → c → d) (da : Dynamic t a) (db : Dynamic t b)
+def zipWith3Id [Timeline t] [BEq a] [BEq b] [BEq d] (f : a → b → c → d) (da : Dynamic t a) (db : Dynamic t b)
     (dc : Dynamic t c) (nodeId1 : NodeId) (nodeId2 : NodeId) : IO (Dynamic t d) := do
   let ab ← Dynamic.zipWithId Prod.mk da db nodeId1
   Dynamic.zipWithId (fun (a, b) c => f a b c) ab dc nodeId2
 
 /-- Combine three dynamics.
     Requires TimelineCtx for type-safe timeline separation. -/
-def zipWith3 [Timeline t] (ctx : TimelineCtx t) (f : a → b → c → d) (da : Dynamic t a) (db : Dynamic t b)
+def zipWith3 [Timeline t] [BEq a] [BEq b] [BEq d] (ctx : TimelineCtx t) (f : a → b → c → d) (da : Dynamic t a) (db : Dynamic t b)
     (dc : Dynamic t c) : IO (Dynamic t d) := do
   let nodeId1 ← ctx.freshNodeId
   let nodeId2 ← ctx.freshNodeId

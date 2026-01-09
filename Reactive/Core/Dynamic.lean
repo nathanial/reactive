@@ -72,22 +72,34 @@ def constant [Timeline t] (ctx : TimelineCtx t) (x : a) : IO (Dynamic t a) := do
   let nodeId ← ctx.freshNodeId
   constantWithId x nodeId
 
-/-- Map a function over a Dynamic's values (with explicit NodeId). -/
-def mapWithId [Timeline t] (f : a → b) (da : Dynamic t a) (nodeId : NodeId) : IO (Dynamic t b) := do
+/-- Map a function over a Dynamic's values (with explicit NodeId).
+    Only fires the change event when the mapped value actually changes.
+    Requires BEq to detect duplicate values. -/
+def mapWithId [Timeline t] [BEq b] (f : a → b) (da : Dynamic t a) (nodeId : NodeId) : IO (Dynamic t b) := do
   let initial ← da.sample
-  let valueRef ← IO.mkRef (f initial)
-  let mappedEvent ← Event.mapWithId f da.changeEvent nodeId
-  let _ ← mappedEvent.subscribe fun b => valueRef.set b
-  pure ⟨valueRef, mappedEvent, fun _ => pure ()⟩
+  let initialMapped := f initial
+  let valueRef ← IO.mkRef initialMapped
+  let (changeEvent, trigger) ← Event.newTriggerWithId nodeId
+  -- Subscribe to source changes and only fire if mapped value changed
+  let _ ← da.changeEvent.subscribe fun newA => do
+    let newB := f newA
+    let oldB ← valueRef.get
+    if newB != oldB then
+      valueRef.set newB
+      trigger newB
+  pure ⟨valueRef, changeEvent, trigger⟩
 
 /-- Map a function over a Dynamic's values.
-    Requires TimelineCtx for type-safe timeline separation. -/
-def map [Timeline t] (ctx : TimelineCtx t) (f : a → b) (da : Dynamic t a) : IO (Dynamic t b) := do
+    Requires TimelineCtx for type-safe timeline separation.
+    Requires BEq to detect duplicate values. -/
+def map [Timeline t] [BEq b] (ctx : TimelineCtx t) (f : a → b) (da : Dynamic t a) : IO (Dynamic t b) := do
   let nodeId ← ctx.freshNodeId
   mapWithId f da nodeId
 
-/-- Combine two Dynamics with a function (with explicit NodeId). -/
-def zipWithId [Timeline t] (f : a → b → c) (da : Dynamic t a) (db : Dynamic t b)
+/-- Combine two Dynamics with a function (with explicit NodeId).
+    Only fires the change event when the combined value actually changes.
+    Requires BEq to detect duplicate values. -/
+def zipWithId [Timeline t] [BEq c] (f : a → b → c) (da : Dynamic t a) (db : Dynamic t b)
     (nodeId : NodeId) : IO (Dynamic t c) := do
   let a ← da.sample
   let b ← db.sample
@@ -98,31 +110,36 @@ def zipWithId [Timeline t] (f : a → b → c) (da : Dynamic t a) (db : Dynamic 
   let _ ← da.changeEvent.subscribe fun newA => do
     let currentB ← db.sample
     let newC := f newA currentB
-    valueRef.set newC
-    trigger newC
+    let oldC ← valueRef.get
+    if newC != oldC then
+      valueRef.set newC
+      trigger newC
 
   -- Subscribe to changes in db
   let _ ← db.changeEvent.subscribe fun newB => do
     let currentA ← da.sample
     let newC := f currentA newB
-    valueRef.set newC
-    trigger newC
+    let oldC ← valueRef.get
+    if newC != oldC then
+      valueRef.set newC
+      trigger newC
 
   pure ⟨valueRef, changeEvent, trigger⟩
 
 /-- Combine two Dynamics with a function.
-    Requires TimelineCtx for type-safe timeline separation. -/
-def zipWith [Timeline t] (ctx : TimelineCtx t) (f : a → b → c) (da : Dynamic t a) (db : Dynamic t b) : IO (Dynamic t c) := do
+    Requires TimelineCtx for type-safe timeline separation.
+    Requires BEq to detect duplicate values. -/
+def zipWith [Timeline t] [BEq c] (ctx : TimelineCtx t) (f : a → b → c) (da : Dynamic t a) (db : Dynamic t b) : IO (Dynamic t c) := do
   let nodeId ← ctx.freshNodeId
   zipWithId f da db nodeId
 
 /-- Pair two Dynamics (with explicit NodeId). -/
-def zipId [Timeline t] (da : Dynamic t a) (db : Dynamic t b) (nodeId : NodeId) : IO (Dynamic t (a × b)) :=
+def zipId [Timeline t] [BEq a] [BEq b] (da : Dynamic t a) (db : Dynamic t b) (nodeId : NodeId) : IO (Dynamic t (a × b)) :=
   zipWithId Prod.mk da db nodeId
 
 /-- Pair two Dynamics.
     Requires TimelineCtx for type-safe timeline separation. -/
-def zip [Timeline t] (ctx : TimelineCtx t) (da : Dynamic t a) (db : Dynamic t b) : IO (Dynamic t (a × b)) :=
+def zip [Timeline t] [BEq a] [BEq b] (ctx : TimelineCtx t) (da : Dynamic t a) (db : Dynamic t b) : IO (Dynamic t (a × b)) :=
   zipWith ctx Prod.mk da db
 
 /-- Create a Dynamic that holds the most recent value from an Event (with explicit NodeId). -/

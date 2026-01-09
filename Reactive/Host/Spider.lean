@@ -417,8 +417,9 @@ registered with the scope via a post-creation subscription to the updated event.
 
 namespace Dynamic
 
-/-- Map a function over a Dynamic, auto-allocating NodeId and registering with scope. -/
-def mapM (f : a → b) (da : Dynamic Spider a) : SpiderM (Dynamic Spider b) := ⟨fun env => do
+/-- Map a function over a Dynamic, auto-allocating NodeId and registering with scope.
+    Only fires the change event when the mapped value actually changes. -/
+def mapM [BEq b] (f : a → b) (da : Dynamic Spider a) : SpiderM (Dynamic Spider b) := ⟨fun env => do
   let nodeId ← env.timelineCtx.freshNodeId
   -- Use existing IO-based map (which creates its own internal subscription)
   let result ← Dynamic.mapWithId f da nodeId
@@ -428,8 +429,9 @@ def mapM (f : a → b) (da : Dynamic Spider a) : SpiderM (Dynamic Spider b) := �
   env.currentScope.register unsub
   pure result⟩
 
-/-- Combine two Dynamics with a function, auto-allocating NodeId and registering with scope. -/
-def zipWithM (f : a → b → c) (da : Dynamic Spider a) (db : Dynamic Spider b)
+/-- Combine two Dynamics with a function, auto-allocating NodeId and registering with scope.
+    Only fires the change event when the combined value actually changes. -/
+def zipWithM [BEq c] (f : a → b → c) (da : Dynamic Spider a) (db : Dynamic Spider b)
     : SpiderM (Dynamic Spider c) := ⟨fun env => do
   let nodeId ← env.timelineCtx.freshNodeId
   -- Use existing IO-based zipWith
@@ -441,8 +443,9 @@ def zipWithM (f : a → b → c) (da : Dynamic Spider a) (db : Dynamic Spider b)
   env.currentScope.register unsub2
   pure result⟩
 
-/-- Combine three Dynamics with a function, auto-allocating NodeIds and registering with scope. -/
-def zipWith3M (f : a → b → c → d)
+/-- Combine three Dynamics with a function, auto-allocating NodeIds and registering with scope.
+    Only fires the change event when the combined value actually changes. -/
+def zipWith3M [BEq a] [BEq b] [BEq d] (f : a → b → c → d)
     (da : Dynamic Spider a) (db : Dynamic Spider b) (dc : Dynamic Spider c)
     : SpiderM (Dynamic Spider d) := do
   -- Implemented using zipWithM which already handles scope registration
@@ -455,7 +458,7 @@ def pureM (x : a) : SpiderM (Dynamic Spider a) := ⟨fun env => do
   Dynamic.constant env.timelineCtx x⟩
 
 /-- Applicative apply for Dynamics, auto-allocating NodeId and registering with scope. -/
-def apM (df : Dynamic Spider (a → b)) (da : Dynamic Spider a)
+def apM [BEq b] (df : Dynamic Spider (a → b)) (da : Dynamic Spider a)
     : SpiderM (Dynamic Spider b) :=
   Dynamic.zipWithM (fun f a => f a) df da
 
@@ -470,29 +473,29 @@ dynA.map' f >>= (·.zipWith' g dynB)
 
 /-- Map a function over a Dynamic (fluent style).
     Enables: `dynamic.map' f` -/
-def map' (da : Dynamic Spider a) (f : a → b) : SpiderM (Dynamic Spider b) :=
+def map' [BEq b] (da : Dynamic Spider a) (f : a → b) : SpiderM (Dynamic Spider b) :=
   mapM f da
 
 /-- Combine with another Dynamic (fluent style).
     Enables: `dynA.zipWith' f dynB` -/
-def zipWith' (da : Dynamic Spider a) (f : a → b → c) (db : Dynamic Spider b)
+def zipWith' [BEq c] (da : Dynamic Spider a) (f : a → b → c) (db : Dynamic Spider b)
     : SpiderM (Dynamic Spider c) :=
   zipWithM f da db
 
 /-- Pair with another Dynamic (fluent style).
     Enables: `dynA.zip' dynB` -/
-def zip' (da : Dynamic Spider a) (db : Dynamic Spider b) : SpiderM (Dynamic Spider (a × b)) :=
+def zip' [BEq a] [BEq b] (da : Dynamic Spider a) (db : Dynamic Spider b) : SpiderM (Dynamic Spider (a × b)) :=
   zipWithM Prod.mk da db
 
 /-- Combine with two other Dynamics (fluent style).
     Enables: `dynA.zipWith3' f dynB dynC` -/
-def zipWith3' (da : Dynamic Spider a) (f : a → b → c → d)
+def zipWith3' [BEq a] [BEq b] [BEq d] (da : Dynamic Spider a) (f : a → b → c → d)
     (db : Dynamic Spider b) (dc : Dynamic Spider c) : SpiderM (Dynamic Spider d) :=
   zipWith3M f da db dc
 
 /-- Apply a Dynamic function (fluent style).
     Enables: `dynF.ap' dynA` -/
-def ap' (df : Dynamic Spider (a → b)) (da : Dynamic Spider a) : SpiderM (Dynamic Spider b) :=
+def ap' [BEq b] (df : Dynamic Spider (a → b)) (da : Dynamic Spider a) : SpiderM (Dynamic Spider b) :=
   apM df da
 
 end Dynamic
