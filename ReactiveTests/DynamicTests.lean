@@ -214,33 +214,6 @@ test "Dynamic.changes provides old and new values" := do
     SpiderM.liftIO receivedRef.get
   shouldBe result [(0, 5), (5, 10), (10, 3)]
 
-test "Dynamic.new allows manual value updates" := do
-  let result ← runSpider do
-    let ctx ← SpiderM.getTimelineCtx
-    let (dyn, update) ← SpiderM.liftIO <| Dynamic.new ctx 0
-    let v0 ← SpiderM.liftIO <| dyn.sample
-    SpiderM.liftIO <| update 42
-    let v1 ← SpiderM.liftIO <| dyn.sample
-    SpiderM.liftIO <| update 100
-    let v2 ← SpiderM.liftIO <| dyn.sample
-    pure (v0, v1, v2)
-  shouldBe result (0, 42, 100)
-
-test "Dynamic.new update fires updated event" := do
-  let result ← runSpider do
-    let ctx ← SpiderM.getTimelineCtx
-    let (dyn, update) ← SpiderM.liftIO <| Dynamic.new ctx 0
-
-    let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
-    let _ ← SpiderM.liftIO <| dyn.updated.subscribe fun n =>
-      receivedRef.modify (· ++ [n])
-
-    SpiderM.liftIO <| update 1
-    SpiderM.liftIO <| update 2
-    SpiderM.liftIO <| update 3
-    SpiderM.liftIO receivedRef.get
-  shouldBe result [1, 2, 3]
-
 test "Dynamic.zip pairs two dynamics" := do
   let result ← runSpider do
     let (e1, t1) ← newTriggerEvent (t := Spider) (a := Nat)
@@ -261,9 +234,9 @@ test "Multiple Dynamic.mapM from same source" := do
   -- Test case: Two derived dynamics from the same source Dynamic
   -- This simulates the pattern used in TextInput components sharing focusedInput
   let result ← runSpider do
-    let ctx ← SpiderM.getTimelineCtx
-    -- Create a source dynamic (like focusedInput : Dynamic Spider (Option String))
-    let (source, setSource) ← SpiderM.liftIO <| Dynamic.new ctx (none : Option String)
+    -- Create a source dynamic using proper FRP pattern (event + holdDyn)
+    let (sourceEvent, fireSource) ← newTriggerEvent (t := Spider) (a := Option String)
+    let source ← holdDyn none sourceEvent
 
     -- Create TWO derived dynamics from the same source (like two TextInputs)
     -- Each checks if the source equals their own name
@@ -275,17 +248,17 @@ test "Multiple Dynamic.mapM from same source" := do
     let v2_0 ← SpiderM.liftIO <| derived2.sample
 
     -- Set focus to input1
-    SpiderM.liftIO <| setSource (some "input1")
+    SpiderM.liftIO <| fireSource (some "input1")
     let v1_1 ← SpiderM.liftIO <| derived1.sample
     let v2_1 ← SpiderM.liftIO <| derived2.sample
 
     -- Set focus to input2
-    SpiderM.liftIO <| setSource (some "input2")
+    SpiderM.liftIO <| fireSource (some "input2")
     let v1_2 ← SpiderM.liftIO <| derived1.sample
     let v2_2 ← SpiderM.liftIO <| derived2.sample
 
     -- Clear focus
-    SpiderM.liftIO <| setSource none
+    SpiderM.liftIO <| fireSource none
     let v1_3 ← SpiderM.liftIO <| derived1.sample
     let v2_3 ← SpiderM.liftIO <| derived2.sample
 
@@ -304,8 +277,9 @@ test "Multiple Dynamic.mapM with subscriptions" := do
   -- More complex test: multiple derived dynamics with subscriptions
   -- This more closely matches the TextInput crash scenario
   let result ← runSpider do
-    let ctx ← SpiderM.getTimelineCtx
-    let (source, setSource) ← SpiderM.liftIO <| Dynamic.new ctx (none : Option String)
+    -- Create a source dynamic using proper FRP pattern (event + holdDyn)
+    let (sourceEvent, fireSource) ← newTriggerEvent (t := Spider) (a := Option String)
+    let source ← holdDyn none sourceEvent
 
     -- Create derived dynamics
     let derived1 ← Dynamic.mapM (· == some "input1") source
@@ -321,9 +295,9 @@ test "Multiple Dynamic.mapM with subscriptions" := do
       updates2.modify (· ++ [b])
 
     -- Trigger updates
-    SpiderM.liftIO <| setSource (some "input1")
-    SpiderM.liftIO <| setSource (some "input2")
-    SpiderM.liftIO <| setSource none
+    SpiderM.liftIO <| fireSource (some "input1")
+    SpiderM.liftIO <| fireSource (some "input2")
+    SpiderM.liftIO <| fireSource none
 
     let u1 ← SpiderM.liftIO <| updates1.get
     let u2 ← SpiderM.liftIO <| updates2.get

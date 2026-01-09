@@ -6,6 +6,28 @@ This document outlines potential improvements, new features, and cleanup tasks f
 
 ## Recently Completed
 
+### [DONE] Remove Dynamic.new Public API
+
+Removed the public `Dynamic.new` function that returned a setter, which enabled dangerous anti-patterns like subscribe/sample/set.
+
+**Changes:**
+- Removed `Dynamic.new` entirely from public API
+- Made `Dynamic.newWithId` `protected` (requires full namespace `Reactive.Dynamic.newWithId`)
+- Changed `Dynamic.mk` constructor from `private` to `protected`
+- Added private `createDynamic` helper in Spider.lean for internal use
+- Updated internal combinators (`switchDynamicWithId`) to use protected function
+
+**Rationale:** The setter returned by `Dynamic.new` allowed imperative patterns that bypass the FRP model and can cause crashes when sampling and setting the same Dynamic during propagation. Users should create Dynamics via:
+- `holdDyn` - hold most recent event value
+- `foldDyn` - fold over event occurrences
+- `Dynamic.map`, `zipWith` - derive from other dynamics
+
+**Files Modified:**
+- `Reactive/Core/Dynamic.lean` (removed new, protected newWithId)
+- `Reactive/Host/Spider.lean` (added private createDynamic)
+- `Reactive/Combinators/Switch.lean` (use protected newWithId)
+- `ReactiveTests/DynamicTests.lean` (removed tests, updated others)
+
 ### [DONE] Dynamic SpiderM Combinators
 
 Added ergonomic `SpiderM`-based combinators that auto-allocate NodeIds:
@@ -254,7 +276,7 @@ Implemented compile-time enforcement preventing mixing events from different tim
 
 These issues were identified during real-world usage in the afferent-demos ReactiveShowcase application.
 
-### [Issue] subscribe/sample/set Pattern is Dangerous
+### [ADDRESSED] subscribe/sample/set Pattern is Dangerous
 
 **Problem:** Sampling and updating the same Dynamic inside a subscription callback can cause crashes or unexpected behavior.
 
@@ -270,9 +292,7 @@ let allClicks ← Event.mergeM btn1.onClick btn2.onClick
 let counter ← foldDyn (fun _ n => n + 1) 0 allClicks
 ```
 
-**Root Cause:** The exact failure mode is unclear, but it appears related to the interaction between event propagation and dynamic updates during the same propagation frame.
-
-**Workaround:** Use `foldDyn` or other declarative combinators instead of imperative subscribe/sample/set patterns.
+**Resolution:** Removed `Dynamic.new` from the public API. Users can no longer create Dynamics with exposed setters, forcing use of proper FRP patterns like `holdDyn` and `foldDyn`. See "Remove Dynamic.new Public API" in Recently Completed.
 
 ---
 

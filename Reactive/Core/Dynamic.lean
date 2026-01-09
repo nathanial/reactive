@@ -21,7 +21,7 @@ namespace Reactive
     - `current`: Get the behavior (for sampling the current value)
     - `updated`: Get the event that fires with new values on change -/
 structure Dynamic (t : Type) (a : Type) where
-  private mk ::
+  protected mk ::
   /-- Reference holding the current value -/
   private valueRef : IO.Ref a
   /-- Event that fires when the value changes, carrying the new value -/
@@ -43,22 +43,20 @@ def updated (d : Dynamic t a) : Event t a :=
 def sample (d : Dynamic t a) : IO a :=
   d.valueRef.get
 
-/-- Create a new Dynamic with an initial value (with explicit NodeId).
-    Returns the Dynamic and a function to update its value. -/
-def newWithId [Timeline t] (initial : a) (nodeId : NodeId) : IO (Dynamic t a × (a → IO Unit)) := do
+/-- Internal: Create a new Dynamic with an initial value (with explicit NodeId).
+    Returns the Dynamic and a function to update its value.
+
+    WARNING: This is protected for internal use by combinators. Application code
+    should use `holdDyn`, `foldDyn`, or other SpiderM combinators instead.
+    Using this directly with the returned setter can lead to anti-patterns
+    like subscribe/sample/set which may cause unexpected behavior. -/
+protected def newWithId [Timeline t] (initial : a) (nodeId : NodeId) : IO (Dynamic t a × (a → IO Unit)) := do
   let valueRef ← IO.mkRef initial
   let (changeEvent, trigger) ← Event.newTriggerWithId nodeId
   let update := fun newValue => do
     valueRef.set newValue
     trigger newValue
   pure (⟨valueRef, changeEvent, trigger⟩, update)
-
-/-- Create a new Dynamic with an initial value.
-    Returns the Dynamic and a function to update its value.
-    Requires TimelineCtx for type-safe timeline separation. -/
-def new [Timeline t] (ctx : TimelineCtx t) (initial : a) : IO (Dynamic t a × (a → IO Unit)) := do
-  let nodeId ← ctx.freshNodeId
-  newWithId initial nodeId
 
 /-- Create a constant Dynamic that never changes (with explicit NodeId). -/
 def constantWithId [Timeline t] (x : a) (nodeId : NodeId) : IO (Dynamic t a) := do

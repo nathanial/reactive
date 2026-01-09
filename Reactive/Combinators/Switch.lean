@@ -50,7 +50,7 @@ def switchDynamicWithId [Timeline t] (dd : Dynamic t (Dynamic t a)) (nodeId : No
     : IO (Dynamic t a) := do
   let initialInner ← dd.sample
   let initialValue ← initialInner.sample
-  let (result, updateResult) ← Dynamic.newWithId initialValue nodeId
+  let (result, updateResult) ← Reactive.Dynamic.newWithId initialValue nodeId
   let currentUnsubRef ← IO.mkRef (pure () : IO Unit)
 
   -- Helper to subscribe to an inner dynamic

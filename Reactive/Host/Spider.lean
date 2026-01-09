@@ -109,6 +109,18 @@ def withFrame (env : SpiderEnv) (action : IO Unit) : IO Unit := do
 
 end SpiderEnv
 
+/-- Internal helper to create a Dynamic with an update function.
+    This is private to prevent downstream consumers from creating Dynamics
+    with exposed setters, which can lead to anti-patterns like subscribe/sample/set. -/
+private def createDynamic (ctx : TimelineCtx Spider) (initial : a) : IO (Dynamic Spider a × (a → IO Unit)) := do
+  let valueRef ← IO.mkRef initial
+  let nodeId ← ctx.freshNodeId
+  let (changeEvent, trigger) ← Event.newTriggerWithId nodeId
+  let update := fun newValue => do
+    valueRef.set newValue
+    trigger newValue
+  pure (Dynamic.mk valueRef changeEvent trigger, update)
+
 /-- The Spider monad for building reactive networks.
 
     SpiderM provides:
@@ -207,13 +219,13 @@ instance : MonadHold Spider SpiderM where
     pure (Behavior.fromSample valueRef.get)⟩
 
   holdDyn initial event := ⟨fun env => do
-    let (dyn, update) ← Dynamic.new env.timelineCtx initial
+    let (dyn, update) ← createDynamic env.timelineCtx initial
     let unsub ← event.subscribe fun a => update a
     env.currentScope.register unsub
     pure dyn⟩
 
   foldDyn f initial event := ⟨fun env => do
-    let (dyn, update) ← Dynamic.new env.timelineCtx initial
+    let (dyn, update) ← createDynamic env.timelineCtx initial
     let unsub ← event.subscribe fun a => do
       let old ← dyn.sample
       update (f a old)
@@ -222,7 +234,7 @@ instance : MonadHold Spider SpiderM where
 
   foldDynM f initial event := ⟨fun env => do
     -- For monadic fold, we create a dynamic and update it with each event
-    let (dyn, update) ← Dynamic.new env.timelineCtx initial
+    let (dyn, update) ← createDynamic env.timelineCtx initial
     let unsub ← event.subscribe fun a => do
       let old ← dyn.sample
       -- Run the SpiderM action to get the new value
@@ -972,7 +984,7 @@ def traverseDynList (f : a → SpiderM b) (dynList : Dynamic Spider (List a))
   let initialResults ← initialList.mapM fun a => (f a).run env
 
   -- Create result dynamic
-  let (resultDyn, updateResult) ← Dynamic.new env.timelineCtx initialResults
+  let (resultDyn, updateResult) ← createDynamic env.timelineCtx initialResults
 
   -- Subscribe to list changes and rebuild results
   let unsub ← dynList.updated.subscribe fun newList => do
