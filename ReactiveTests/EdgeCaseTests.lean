@@ -141,6 +141,187 @@ test "filter with always-false predicate creates silent event" := do
     SpiderM.liftIO receivedRef.get
   shouldBe result []
 
+-- Stress tests
+
+test "large fan-out: 500 subscribers all receive values" := do
+  let result ← runSpider do
+    let (event, trigger) ← newTriggerEvent (t := Spider) (a := Nat)
+    let countRef ← SpiderM.liftIO <| IO.mkRef (0 : Nat)
+
+    -- Add 500 subscribers
+    for _ in [0:500] do
+      let _ ← SpiderM.liftIO <| event.subscribe fun _ =>
+        countRef.modify (· + 1)
+
+    SpiderM.liftIO <| trigger 1
+    SpiderM.liftIO countRef.get
+  shouldBe result 500
+
+test "rapid subscribe/unsubscribe cycles" := do
+  let result ← runSpider do
+    let (event, trigger) ← newTriggerEvent (t := Spider) (a := Nat)
+    let countRef ← SpiderM.liftIO <| IO.mkRef (0 : Nat)
+
+    -- Rapidly subscribe and unsubscribe 100 times
+    for _ in [0:100] do
+      let unsub ← SpiderM.liftIO <| event.subscribe fun _ =>
+        countRef.modify (· + 1)
+      SpiderM.liftIO unsub
+
+    -- Now add a permanent subscriber
+    let _ ← SpiderM.liftIO <| event.subscribe fun _ =>
+      countRef.modify (· + 1)
+
+    SpiderM.liftIO <| trigger 1
+    SpiderM.liftIO countRef.get
+  -- Only the permanent subscriber should receive
+  shouldBe result 1
+
+test "subscribe during event firing" := do
+  let result ← runSpider do
+    let (event, trigger) ← newTriggerEvent (t := Spider) (a := Nat)
+    let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
+    let subscribed ← SpiderM.liftIO <| IO.mkRef false
+
+    -- First subscriber adds a second subscriber when fired
+    let _ ← SpiderM.liftIO <| event.subscribe fun n => do
+      receivedRef.modify (· ++ [n])
+      let alreadySubscribed ← subscribed.get
+      if !alreadySubscribed then
+        subscribed.set true
+        let _ ← event.subscribe fun m =>
+          receivedRef.modify (· ++ [m + 1000])
+        pure ()
+
+    SpiderM.liftIO <| trigger 1
+    SpiderM.liftIO <| trigger 2
+    SpiderM.liftIO receivedRef.get
+  -- First fire: [1], second fire: [2, 1002] (new subscriber sees it)
+  shouldBe result [1, 2, 1002]
+
+test "unsubscribe during event firing" := do
+  let result ← runSpider do
+    let (event, trigger) ← newTriggerEvent (t := Spider) (a := Nat)
+    let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
+    let unsubRef ← SpiderM.liftIO <| IO.mkRef (pure () : IO Unit)
+
+    -- Subscriber that unsubscribes itself after first fire
+    let unsub ← SpiderM.liftIO <| event.subscribe fun n => do
+      receivedRef.modify (· ++ [n])
+      let doUnsub ← unsubRef.get
+      doUnsub
+
+    SpiderM.liftIO <| unsubRef.set unsub
+
+    SpiderM.liftIO <| trigger 1  -- received, then unsubscribes
+    SpiderM.liftIO <| trigger 2  -- not received
+    SpiderM.liftIO <| trigger 3  -- not received
+    SpiderM.liftIO receivedRef.get
+  shouldBe result [1]
+
+test "map chain with 100 transformations" := do
+  let result ← runSpider do
+    let (source, trigger) ← newTriggerEvent (t := Spider) (a := Nat)
+
+    -- Build a chain of 100 map operations
+    let mut current := source
+    for _ in [0:100] do
+      current ← Event.mapM (· + 1) current
+
+    let receivedRef ← SpiderM.liftIO <| IO.mkRef (0 : Nat)
+    let _ ← SpiderM.liftIO <| current.subscribe fun n =>
+      receivedRef.set n
+
+    SpiderM.liftIO <| trigger 0
+    SpiderM.liftIO receivedRef.get
+  shouldBe result 100
+
+test "filter chain preserves values through multiple filters" := do
+  let result ← runSpider do
+    let (source, trigger) ← newTriggerEvent (t := Spider) (a := Nat)
+
+    -- Chain multiple filters: keep only multiples of 2, 3, and 5
+    let f1 ← Event.filterM (fun n => n % 2 == 0) source
+    let f2 ← Event.filterM (fun n => n % 3 == 0) f1
+    let f3 ← Event.filterM (fun n => n % 5 == 0) f2
+
+    let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
+    let _ ← SpiderM.liftIO <| f3.subscribe fun n =>
+      receivedRef.modify (· ++ [n])
+
+    -- Fire various numbers
+    for i in [1:61] do
+      SpiderM.liftIO <| trigger i
+
+    SpiderM.liftIO receivedRef.get
+  -- Only multiples of 30 should pass (30, 60)
+  shouldBe result [30, 60]
+
+test "takeN with zero takes nothing" := do
+  let result ← runSpider do
+    let (event, trigger) ← newTriggerEvent (t := Spider) (a := Nat)
+    let taken ← Event.takeNM 0 event
+
+    let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
+    let _ ← SpiderM.liftIO <| taken.subscribe fun n =>
+      receivedRef.modify (· ++ [n])
+
+    SpiderM.liftIO <| trigger 1
+    SpiderM.liftIO <| trigger 2
+    SpiderM.liftIO receivedRef.get
+  shouldBe result []
+
+test "dropN with zero drops nothing" := do
+  let result ← runSpider do
+    let (event, trigger) ← newTriggerEvent (t := Spider) (a := Nat)
+    let dropped ← Event.dropNM 0 event
+
+    let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
+    let _ ← SpiderM.liftIO <| dropped.subscribe fun n =>
+      receivedRef.modify (· ++ [n])
+
+    SpiderM.liftIO <| trigger 1
+    SpiderM.liftIO <| trigger 2
+    SpiderM.liftIO receivedRef.get
+  shouldBe result [1, 2]
+
+test "accumulate with non-commutative operation preserves order" := do
+  let result ← runSpider do
+    let (event, trigger) ← newTriggerEvent (t := Spider) (a := String)
+    -- Prepend each new value
+    let accumulated ← Event.accumulateM (fun new acc => new ++ acc) "" event
+
+    let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List String)
+    let _ ← SpiderM.liftIO <| accumulated.subscribe fun s =>
+      receivedRef.modify (· ++ [s])
+
+    SpiderM.liftIO <| trigger "a"
+    SpiderM.liftIO <| trigger "b"
+    SpiderM.liftIO <| trigger "c"
+    SpiderM.liftIO receivedRef.get
+  shouldBe result ["a", "ba", "cba"]
+
+test "multiple events firing in same frame maintain order" := do
+  let result ← runSpider do
+    let (e1, t1) ← newTriggerEvent (t := Spider) (a := Nat)
+    let (e2, t2) ← newTriggerEvent (t := Spider) (a := Nat)
+    let (e3, t3) ← newTriggerEvent (t := Spider) (a := Nat)
+
+    let merged ← Event.leftmostM [e1, e2, e3]
+
+    let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
+    let _ ← SpiderM.liftIO <| merged.subscribe fun n =>
+      receivedRef.modify (· ++ [n])
+
+    -- Fire in specific order
+    SpiderM.liftIO <| t1 1
+    SpiderM.liftIO <| t2 2
+    SpiderM.liftIO <| t3 3
+    SpiderM.liftIO <| t2 4
+    SpiderM.liftIO <| t1 5
+    SpiderM.liftIO receivedRef.get
+  shouldBe result [1, 2, 3, 4, 5]
+
 #generate_tests
 
 end ReactiveTests.EdgeCaseTests

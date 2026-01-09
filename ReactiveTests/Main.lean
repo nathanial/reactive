@@ -14,6 +14,7 @@ import ReactiveTests.ErrorTests
 import ReactiveTests.EdgeCaseTests
 import ReactiveTests.IntegrationHelperTests
 import ReactiveTests.FluentApiTests
+import ReactiveTests.TopologyTests
 
 open Crucible
 
