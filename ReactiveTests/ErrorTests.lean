@@ -179,6 +179,76 @@ test "runSpiderWithErrorHandler uses provided handler" := do
   -- strictErrorHandler returns false (don't continue)
   shouldBe result false
 
+test "construction depth limit throws on exceeded" := do
+  -- Test that exceeding maxConstructionDepth throws an error
+  let result ← do
+    try
+      -- This should throw because we're creating too many nested operations
+      let _ ← SpiderM.runFresh do
+        -- Get the env to manually test incrementDepth
+        let env ← SpiderM.getEnv
+        -- Simulate exceeding the depth limit
+        for _ in [:maxConstructionDepth + 100] do
+          let _ ← SpiderM.liftIO <| env.incrementDepth "test"
+        pure ()
+      pure false  -- Should not reach here
+    catch _ =>
+      pure true  -- Got expected error
+  shouldBe result true
+
+test "construction depth limit error message contains operation name" := do
+  let result ← do
+    try
+      let _ ← SpiderM.runFresh do
+        let env ← SpiderM.getEnv
+        for _ in [:maxConstructionDepth + 1] do
+          let _ ← SpiderM.liftIO <| env.incrementDepth "myOperation"
+        pure ()
+      pure ""
+    catch e =>
+      pure e.toString
+  -- Error message should mention the operation name
+  let parts := result.splitOn "myOperation"
+  let hasMessage := decide (parts.length > 1)
+  shouldBe hasMessage true
+
+test "propagation depth limit throws on exceeded" := do
+  -- Test that exceeding maxPropagationDepth throws an error during event propagation
+  let result ← do
+    try
+      let _ ← SpiderM.runFresh do
+        -- Create an event that triggers itself recursively
+        let (event, trigger) ← newTriggerEvent (t := Spider) (a := Nat)
+        -- Subscribe to fire the same event again (infinite loop)
+        let _ ← SpiderM.liftIO <| event.subscribe fun n => do
+          if n < maxPropagationDepth + 100 then
+            trigger (n + 1)
+        -- Start the infinite loop
+        SpiderM.liftIO <| trigger 0
+        pure ()
+      pure false  -- Should not reach here
+    catch _ =>
+      pure true  -- Got expected error
+  shouldBe result true
+
+test "propagation depth limit error message mentions propagation" := do
+  let result ← do
+    try
+      let _ ← SpiderM.runFresh do
+        let (event, trigger) ← newTriggerEvent (t := Spider) (a := Nat)
+        let _ ← SpiderM.liftIO <| event.subscribe fun n => do
+          if n < maxPropagationDepth + 100 then
+            trigger (n + 1)
+        SpiderM.liftIO <| trigger 0
+        pure ()
+      pure ""
+    catch e =>
+      pure e.toString
+  -- Error message should mention propagation
+  let parts := result.splitOn "propagation"
+  let hasMessage := decide (parts.length > 1)
+  shouldBe hasMessage true
+
 #generate_tests
 
 end ReactiveTests.ErrorTests

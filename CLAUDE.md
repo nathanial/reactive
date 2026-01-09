@@ -96,6 +96,21 @@ def Dynamic (t : Type) (a : Type) : Type
 
 Nodes have height for topological ordering to prevent glitches. Derived nodes have higher heights than their sources.
 
+### ForIn Instances for Custom Monads
+
+**Important**: When defining custom monads that wrap `SpiderM` (e.g., via `ReaderT`), you must define an explicit `ForIn` instance. Without one, Lean's synthesized instance may cause infinite loops in `for` loops.
+
+```lean
+-- Example: ReactiveM wraps SpiderM with a reader context
+abbrev ReactiveM := ReaderT ReactiveEvents SpiderM
+
+-- REQUIRED: Explicit ForIn instance to avoid hangs
+instance [ForIn SpiderM ρ α] : ForIn ReactiveM ρ α where
+  forIn x init f := fun ctx => ForIn.forIn x init fun a b => f a b ctx
+```
+
+`SpiderM` already has an explicit `ForIn` instance that delegates to IO. Any monad transformer stacked on top needs its own instance that properly threads through the context.
+
 ## Testing
 
 Tests use the Crucible framework. See `ReactiveTests/` for examples.

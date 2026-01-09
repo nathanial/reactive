@@ -32,6 +32,12 @@ def defaultErrorHandler : PropagationErrorHandler := fun err => do
 /-- Strict error handler: re-raises the first error, stopping propagation -/
 def strictErrorHandler : PropagationErrorHandler := fun _ => pure false
 
+/-- Maximum construction depth before throwing an error (detects infinite loops) -/
+def maxConstructionDepth : Nat := 10000
+
+/-- Maximum propagation depth before throwing an error (detects infinite event loops) -/
+def maxPropagationDepth : Nat := 10000
+
 structure SpiderEnv where
   /-- Timeline context for type-safe event creation -/
   timelineCtx : TimelineCtx Spider
@@ -47,6 +53,10 @@ structure SpiderEnv where
   currentScope : SubscriptionScope
   /-- Error handler for subscriber callback exceptions -/
   errorHandler : IO.Ref PropagationErrorHandler
+  /-- Construction depth counter for infinite loop detection -/
+  constructionDepth : IO.Ref Nat
+  /-- Propagation depth counter for infinite event loop detection -/
+  propagationDepth : IO.Ref Nat
 
 namespace SpiderEnv
 
@@ -58,13 +68,27 @@ def new (errorHandler : PropagationErrorHandler := defaultErrorHandler) : IO Spi
   let propagationQueue ← IO.mkRef {}
   let currentScope ← SubscriptionScope.new
   let errorHandlerRef ← IO.mkRef errorHandler
+  let constructionDepth ← IO.mkRef 0
+  let propagationDepth ← IO.mkRef 0
   -- Set global propagation context for frame-based firing
   setPropagationContext propagationQueue
-  pure { timelineCtx, postBuildActions, postBuildEvent, postBuildTrigger, propagationQueue, currentScope, errorHandler := errorHandlerRef }
+  pure { timelineCtx, postBuildActions, postBuildEvent, postBuildTrigger, propagationQueue, currentScope, errorHandler := errorHandlerRef, constructionDepth, propagationDepth }
+
+/-- Increment construction depth and throw if exceeded. Returns the new depth. -/
+def incrementDepth (env : SpiderEnv) (operation : String) : IO Nat := do
+  let depth ← env.constructionDepth.modifyGet fun d => (d + 1, d + 1)
+  if depth > maxConstructionDepth then
+    throw <| IO.userError s!"[Reactive] Infinite loop detected during FRP network construction (depth {depth} exceeded {maxConstructionDepth}). Last operation: {operation}"
+  pure depth
+
+/-- Decrement construction depth -/
+def decrementDepth (env : SpiderEnv) : IO Unit := do
+  env.constructionDepth.modify (· - 1)
 
 /-- Process all pending fires in height order until queue is empty.
     When current frame is empty, processes nextFramePending in a new sub-frame.
-    Errors in subscriber callbacks are handled by the configured error handler. -/
+    Errors in subscriber callbacks are handled by the configured error handler.
+    Throws if total events processed exceeds maxPropagationDepth (detects infinite event loops). -/
 partial def drainQueue (env : SpiderEnv) : IO Unit := do
   let q ← env.propagationQueue.get
   match q.popMin? with
@@ -81,6 +105,11 @@ partial def drainQueue (env : SpiderEnv) : IO Unit := do
       }
       env.drainQueue
   | some (pending, q') =>
+    -- Check total events processed for infinite loop detection
+    let count ← env.propagationDepth.modifyGet fun d => (d + 1, d + 1)
+    if count > maxPropagationDepth then
+      throw <| IO.userError s!"[Reactive] Infinite loop detected during event propagation ({count} events processed, exceeded {maxPropagationDepth}). This usually means an event subscriber is triggering events recursively."
+
     env.propagationQueue.set q'
     -- Execute the fire action with error handling
     try
@@ -101,7 +130,8 @@ def withFrame (env : SpiderEnv) (action : IO Unit) : IO Unit := do
     -- Already in a frame, just run (fires will enqueue)
     action
   else
-    -- Start new frame
+    -- Start new frame, reset propagation counter for infinite loop detection
+    env.propagationDepth.set 0
     env.propagationQueue.set { q with inFrame := true }
     action
     env.drainQueue
@@ -190,6 +220,10 @@ def liftIO (action : IO α) : SpiderM α := liftM (m := IO) action
 def getScope : SpiderM SubscriptionScope :=
   ⟨fun env => pure env.currentScope⟩
 
+/-- Get the current SpiderEnv (for advanced use cases like testing) -/
+def getEnv : SpiderM SpiderEnv :=
+  ⟨fun env => pure env⟩
+
 /-- Run an action with a new child scope.
     Returns the result and the child scope (for manual disposal if needed). -/
 def withScope (action : SpiderM a) : SpiderM (a × SubscriptionScope) :=
@@ -212,27 +246,34 @@ instance : MonadSample Spider SpiderM where
 
 instance : MonadHold Spider SpiderM where
   hold initial event := ⟨fun env => do
+    let _ ← env.incrementDepth "hold"
     -- Create a behavior that holds the latest value
     let valueRef ← IO.mkRef initial
     let unsub ← Reactive.Event.subscribe event fun a => valueRef.set a
     env.currentScope.register unsub
+    env.decrementDepth
     pure (Behavior.fromSample valueRef.get)⟩
 
   holdDyn initial event := ⟨fun env => do
+    let _ ← env.incrementDepth "holdDyn"
     let (dyn, update) ← createDynamic env.timelineCtx initial
     let unsub ← Reactive.Event.subscribe event fun a => update a
     env.currentScope.register unsub
+    env.decrementDepth
     pure dyn⟩
 
   foldDyn f initial event := ⟨fun env => do
+    let _ ← env.incrementDepth "foldDyn"
     let (dyn, update) ← createDynamic env.timelineCtx initial
     let unsub ← Reactive.Event.subscribe event fun a => do
       let old ← dyn.sample
       update (f a old)
     env.currentScope.register unsub
+    env.decrementDepth
     pure dyn⟩
 
   foldDynM f initial event := ⟨fun env => do
+    let _ ← env.incrementDepth "foldDynM"
     -- For monadic fold, we create a dynamic and update it with each event
     let (dyn, update) ← createDynamic env.timelineCtx initial
     let unsub ← Reactive.Event.subscribe event fun a => do
@@ -242,6 +283,7 @@ instance : MonadHold Spider SpiderM where
       let new ← newM.run env
       update new
     env.currentScope.register unsub
+    env.decrementDepth
     pure dyn⟩
 
 instance : TriggerEvent Spider SpiderM where
@@ -432,6 +474,7 @@ namespace Dynamic
 /-- Map a function over a Dynamic, auto-allocating NodeId and registering with scope.
     Only fires the change event when the mapped value actually changes. -/
 def mapM [BEq b] (f : a → b) (da : Dynamic Spider a) : SpiderM (Dynamic Spider b) := ⟨fun env => do
+  let _ ← env.incrementDepth "Dynamic.mapM"
   let nodeId ← env.timelineCtx.freshNodeId
   -- Use existing IO-based map (which creates its own internal subscription)
   let result ← Dynamic.mapWithId f da nodeId
@@ -439,12 +482,14 @@ def mapM [BEq b] (f : a → b) (da : Dynamic Spider a) : SpiderM (Dynamic Spider
   -- This tracks the subscription for cleanup
   let unsub ← Reactive.Event.subscribe da.updated fun _ => pure ()
   env.currentScope.register unsub
+  env.decrementDepth
   pure result⟩
 
 /-- Combine two Dynamics with a function, auto-allocating NodeId and registering with scope.
     Only fires the change event when the combined value actually changes. -/
 def zipWithM [BEq c] (f : a → b → c) (da : Dynamic Spider a) (db : Dynamic Spider b)
     : SpiderM (Dynamic Spider c) := ⟨fun env => do
+  let _ ← env.incrementDepth "Dynamic.zipWithM"
   let nodeId ← env.timelineCtx.freshNodeId
   -- Use existing IO-based zipWith
   let result ← Dynamic.zipWithId f da db nodeId
@@ -453,6 +498,7 @@ def zipWithM [BEq c] (f : a → b → c) (da : Dynamic Spider a) (db : Dynamic S
   let unsub2 ← Reactive.Event.subscribe db.updated fun _ => pure ()
   env.currentScope.register unsub1
   env.currentScope.register unsub2
+  env.decrementDepth
   pure result⟩
 
 /-- Combine three Dynamics with a function, auto-allocating NodeIds and registering with scope.
@@ -523,7 +569,10 @@ def ap' [BEq b] (df : Dynamic Spider (a → b)) (da : Dynamic Spider a) : Spider
     ```
 -/
 def changesM (d : Dynamic Spider a) : SpiderM (Event Spider (a × a)) := ⟨fun env => do
-  Dynamic.changesId d (← env.timelineCtx.freshNodeId)⟩
+  let _ ← env.incrementDepth "Dynamic.changesM"
+  let result ← Dynamic.changesId d (← env.timelineCtx.freshNodeId)
+  env.decrementDepth
+  pure result⟩
 
 end Dynamic
 
@@ -576,23 +625,28 @@ protected def subscribeM (e : Event Spider a) (callback : Subscriber a) : Spider
 
 /-- Map a function over an Event, auto-allocating NodeId and registering with scope. -/
 def mapM (f : a → b) (e : Event Spider a) : SpiderM (Event Spider b) := ⟨fun env => do
+  let _ ← env.incrementDepth "Event.mapM"
   let nodeId ← env.timelineCtx.freshNodeId
   let derived ← Event.newNodeWithId nodeId (e.height.inc)
   let unsub ← Reactive.Event.subscribe e fun a => derived.fire (f a)
   env.currentScope.register unsub
+  env.decrementDepth
   pure derived⟩
 
 /-- Filter an Event by a predicate, auto-allocating NodeId and registering with scope. -/
 def filterM (p : a → Bool) (e : Event Spider a) : SpiderM (Event Spider a) := ⟨fun env => do
+  let _ ← env.incrementDepth "Event.filterM"
   let nodeId ← env.timelineCtx.freshNodeId
   let derived ← Event.newNodeWithId nodeId (e.height.inc)
   let unsub ← Reactive.Event.subscribe e fun a =>
     if p a then derived.fire a else pure ()
   env.currentScope.register unsub
+  env.decrementDepth
   pure derived⟩
 
 /-- Filter and map an Event, auto-allocating NodeId and registering with scope. -/
 def mapMaybeM (f : a → Option b) (e : Event Spider a) : SpiderM (Event Spider b) := ⟨fun env => do
+  let _ ← env.incrementDepth "Event.mapMaybeM"
   let nodeId ← env.timelineCtx.freshNodeId
   let derived ← Event.newNodeWithId nodeId (e.height.inc)
   let unsub ← Reactive.Event.subscribe e fun a =>
@@ -600,10 +654,12 @@ def mapMaybeM (f : a → Option b) (e : Event Spider a) : SpiderM (Event Spider 
     | some b => derived.fire b
     | none => pure ()
   env.currentScope.register unsub
+  env.decrementDepth
   pure derived⟩
 
 /-- Merge two Events, auto-allocating NodeId and registering with scope. -/
 def mergeM (e1 : Event Spider a) (e2 : Event Spider a) : SpiderM (Event Spider a) := ⟨fun env => do
+  let _ ← env.incrementDepth "Event.mergeM"
   let nodeId ← env.timelineCtx.freshNodeId
   let height := Height.inc (max e1.height e2.height)
   let derived ← Event.newNodeWithId nodeId height
@@ -611,51 +667,61 @@ def mergeM (e1 : Event Spider a) (e2 : Event Spider a) : SpiderM (Event Spider a
   let unsub2 ← Reactive.Event.subscribe e2 derived.fire
   env.currentScope.register unsub1
   env.currentScope.register unsub2
+  env.decrementDepth
   pure derived⟩
 
 /-- Tag an Event with a Behavior's current value, auto-allocating NodeId and registering with scope. -/
 def tagM (beh : Behavior Spider a) (e : Event Spider b) : SpiderM (Event Spider a) := ⟨fun env => do
+  let _ ← env.incrementDepth "Event.tagM"
   let nodeId ← env.timelineCtx.freshNodeId
   let derived ← Event.newNodeWithId nodeId (e.height.inc)
   let unsub ← Reactive.Event.subscribe e fun _ => do
     let v ← beh.sample
     derived.fire v
   env.currentScope.register unsub
+  env.decrementDepth
   pure derived⟩
 
 /-- Attach a Behavior's value to an Event, auto-allocating NodeId and registering with scope. -/
 def attachM (b : Behavior Spider a) (e : Event Spider c) : SpiderM (Event Spider (a × c)) := ⟨fun env => do
+  let _ ← env.incrementDepth "Event.attachM"
   let nodeId ← env.timelineCtx.freshNodeId
   let derived ← Event.newNodeWithId nodeId (e.height.inc)
   let unsub ← Reactive.Event.subscribe e fun c => do
     let a ← b.sample
     derived.fire (a, c)
   env.currentScope.register unsub
+  env.decrementDepth
   pure derived⟩
 
 /-- Attach with a combining function, auto-allocating NodeId and registering with scope. -/
 def attachWithM (f : a → c → d) (b : Behavior Spider a) (e : Event Spider c)
     : SpiderM (Event Spider d) := ⟨fun env => do
+  let _ ← env.incrementDepth "Event.attachWithM"
   let nodeId ← env.timelineCtx.freshNodeId
   let derived ← Event.newNodeWithId nodeId (e.height.inc)
   let unsub ← Reactive.Event.subscribe e fun c => do
     let a ← b.sample
     derived.fire (f a c)
   env.currentScope.register unsub
+  env.decrementDepth
   pure derived⟩
 
 /-- Gate an Event by a Boolean Behavior, auto-allocating NodeId and registering with scope. -/
 def gateM (beh : Behavior Spider Bool) (e : Event Spider a) : SpiderM (Event Spider a) := ⟨fun env => do
+  let _ ← env.incrementDepth "Event.gateM"
   let nodeId ← env.timelineCtx.freshNodeId
   let derived ← Event.newNodeWithId nodeId (e.height.inc)
   let unsub ← Reactive.Event.subscribe e fun a => do
     let isOpen ← beh.sample
     if isOpen then derived.fire a else pure ()
   env.currentScope.register unsub
+  env.decrementDepth
   pure derived⟩
 
 /-- Merge a list of Events into a list Event, auto-allocating NodeId and registering with scope. -/
 def mergeListM (events : List (Event Spider a)) : SpiderM (Event Spider (List a)) := ⟨fun env => do
+  let _ ← env.incrementDepth "Event.mergeListM"
   let nodeId ← env.timelineCtx.freshNodeId
   let maxHeight := events.foldl (fun h e => max h e.height) ⟨0⟩
   let derived ← Event.newNodeWithId nodeId (maxHeight.inc)
@@ -682,20 +748,24 @@ def mergeListM (events : List (Event Spider a)) : SpiderM (Event Spider (List a)
         | none => flushAction
     env.currentScope.register unsub
 
+  env.decrementDepth
   pure derived⟩
 
 /-- Take the leftmost firing Event from a list, auto-allocating NodeId and registering with scope. -/
 def leftmostM (events : List (Event Spider a)) : SpiderM (Event Spider a) := ⟨fun env => do
+  let _ ← env.incrementDepth "Event.leftmostM"
   let nodeId ← env.timelineCtx.freshNodeId
   let maxHeight := events.foldl (fun h e => max h e.height) ⟨0⟩
   let derived ← Event.newNodeWithId nodeId (maxHeight.inc)
   for e in events do
     let unsub ← Reactive.Event.subscribe e derived.fire
     env.currentScope.register unsub
+  env.decrementDepth
   pure derived⟩
 
 /-- Fan out a Sum Event into two Events, auto-allocating NodeIds and registering with scope. -/
 def fanEitherM (e : Event Spider (Sum a b)) : SpiderM (Event Spider a × Event Spider b) := ⟨fun env => do
+  let _ ← env.incrementDepth "Event.fanEitherM"
   let nodeIdL ← env.timelineCtx.freshNodeId
   let nodeIdR ← env.timelineCtx.freshNodeId
   let leftEvent ← Event.newNodeWithId nodeIdL (e.height.inc)
@@ -705,6 +775,7 @@ def fanEitherM (e : Event Spider (Sum a b)) : SpiderM (Event Spider a × Event S
     | .inl a => leftEvent.fire a
     | .inr b => rightEvent.fire b
   env.currentScope.register unsub
+  env.decrementDepth
   pure (leftEvent, rightEvent)⟩
 
 /-- Delay an Event by one propagation frame, auto-allocating NodeId and registering with scope.
