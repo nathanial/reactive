@@ -21,4 +21,3 @@ build/
 
 # Lake cache
 .lake
-lake-manifest.json
