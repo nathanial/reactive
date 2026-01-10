@@ -657,6 +657,10 @@ def mapMaybeM (f : a → Option b) (e : Event Spider a) : SpiderM (Event Spider 
   env.decrementDepth
   pure derived⟩
 
+/-- Discard event values, mapping all occurrences to Unit. -/
+def voidM (e : Event Spider a) : SpiderM (Event Spider Unit) :=
+  mapM (fun _ => ()) e
+
 /-- Merge two Events, auto-allocating NodeId and registering with scope. -/
 def mergeM (e1 : Event Spider a) (e2 : Event Spider a) : SpiderM (Event Spider a) := ⟨fun env => do
   let _ ← env.incrementDepth "Event.mergeM"
