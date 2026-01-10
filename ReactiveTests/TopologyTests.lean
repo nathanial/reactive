@@ -145,6 +145,24 @@ test "diamond pattern with mergeList batching" := do
   -- Should batch [20, 30] from both branches
   shouldBe result [[20, 30]]
 
+test "mergeList separates delayed branch into next frame" := do
+  let result ← runSpider do
+    let (source, trigger) ← newTriggerEvent (t := Spider) (a := Nat)
+
+    let immediate ← Event.mapM (· + 1) source
+    let delayed ← Event.delayFrameM source
+    let delayedMapped ← Event.mapM (· + 100) delayed
+
+    let merged ← Event.mergeListM [immediate, delayedMapped]
+
+    let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List (List Nat))
+    let _ ← SpiderM.liftIO <| merged.subscribe fun ns =>
+      receivedRef.modify (· ++ [ns])
+
+    SpiderM.liftIO <| trigger 1
+    SpiderM.liftIO receivedRef.get
+  shouldBe result [[2], [101]]
+
 test "multiple diamond patterns" := do
   let result ← runSpider do
     let (source, trigger) ← newTriggerEvent (t := Spider) (a := Nat)

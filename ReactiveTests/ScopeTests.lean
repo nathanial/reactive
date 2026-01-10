@@ -54,6 +54,19 @@ test "SubscriptionScope.dispose is idempotent" := do
   let countAfterSecond ← callCount.get
   shouldBe countAfterSecond 1
 
+test "SubscriptionScope.dispose clears large subscription lists" := do
+  let scope ← SubscriptionScope.new
+  let callCount ← IO.mkRef 0
+
+  for _ in [0:1000] do
+    scope.register (callCount.modify (· + 1))
+
+  let countBefore ← scope.subscriptionCount
+  scope.dispose
+  let countAfter ← scope.subscriptionCount
+  let calls ← callCount.get
+  shouldBe (countBefore, countAfter, calls) (1000, 0, 1000)
+
 test "Child scopes are disposed with parent" := do
   let parent ← SubscriptionScope.new
   let child ← parent.child
@@ -160,6 +173,21 @@ test "withScope returns child scope for manual disposal" := do
     pure disposedBefore
 
   shouldBe result false
+
+test "manual scope disposal clears subscriptions" := do
+  let result ← runSpider do
+    let (_, childScope) ← SpiderM.withScope do
+      let (event, _) ← newTriggerEvent (t := Spider) (a := Nat)
+      let _ ← Event.mapM (· + 1) event
+      let _ ← Event.filterM (· > 0) event
+      pure ()
+
+    let countBefore ← SpiderM.liftIO <| childScope.subscriptionCount
+    SpiderM.liftIO <| childScope.dispose
+    let countAfter ← SpiderM.liftIO <| childScope.subscriptionCount
+    pure (decide (countBefore ≥ 2), countAfter)
+
+  shouldBe result (true, 0)
 
 test "foldDyn cleans up subscription" := do
   let result ← runSpider do

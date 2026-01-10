@@ -375,6 +375,22 @@ test "Event.accumulateM maintains running state" := do
     SpiderM.liftIO receivedRef.get
   shouldBe result [101, 103, 113]
 
+test "Event.delayFrameM fires after current frame" := do
+  let result ← runSpider do
+    let (event, trigger) ← newTriggerEvent (t := Spider) (a := Nat)
+    let delayed ← Event.delayFrameM event
+
+    let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List String)
+    let _ ← SpiderM.liftIO <| event.subscribe fun n =>
+      receivedRef.modify (· ++ [s!"now {n}"])
+    let _ ← SpiderM.liftIO <| delayed.subscribe fun n =>
+      receivedRef.modify (· ++ [s!"later {n}"])
+
+    SpiderM.liftIO <| trigger 1
+    SpiderM.liftIO <| trigger 2
+    SpiderM.liftIO receivedRef.get
+  shouldBe result ["now 1", "later 1", "now 2", "later 2"]
+
 test "Event.mergeListM with empty list returns never event" := do
   let result ← runSpider do
     let merged ← Event.mergeListM ([] : List (Event Spider Nat))
