@@ -1,116 +1,78 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code when working with the Reactive library.
+Guidance for Claude Code when working with the Reactive library.
 
 ## Overview
 
-Reactive is a Reflex-style Functional Reactive Programming (FRP) library for Lean 4. It provides:
-
-- **Event**: Discrete occurrences over time (push-based)
-- **Behavior**: Time-varying values (pull-based, can sample anytime)
-- **Dynamic**: Behavior with change notification Event
+Reactive is a Reflex-style FRP library for Lean 4. See README.md for API documentation.
 
 ## Build Commands
 
 ```bash
-# Build the library
-lake build
-
-# Run tests
-lake build reactive_tests && .lake/build/bin/reactive_tests
+lake build                                              # Build library
+lake build reactive_tests && .lake/build/bin/reactive_tests  # Run tests
 ```
 
 ## Architecture
 
-### Core Types (`Reactive/Core/`)
-
-- `Types.lean` - Timeline phantom type, NodeId, Height, SubscriberId
-- `Event.lean` - Event type with subscriber management
-- `Behavior.lean` - Behavior type with Monad instance
-- `Dynamic.lean` - Dynamic combining Behavior + change Event
-
-### Typeclasses (`Reactive/Class/`)
-
-- `MonadSample` - Sample behaviors: `sample : Behavior t a → m a`
-- `MonadHold` - Create behaviors from events: `hold`, `holdDyn`, `foldDyn`
-- `TriggerEvent` - Fire external events: `newTriggerEvent`
-- `PostBuild` - Post-construction effects: `getPostBuild`
-- `Adjustable` - Dynamic switching (advanced)
-
-### Combinators (`Reactive/Combinators/`)
-
-- `Event.lean` - `tag`, `attach`, `gate`, `filter`, `merge`, `leftmost`, etc.
-- `Behavior.lean` - `zipWith`, `allTrue`, `anyTrue`, `and`, `or`, etc.
-- `Dynamic.lean` - `zipWith`, `changes`, `tagUpdated`, etc.
-- `Switch.lean` - `switch`, `switchDyn`, `switchBehavior`, `switchDynamic`
-
-### Host (`Reactive/Host/`)
-
-- `Spider.lean` - IO-based push runtime (`SpiderM` monad)
-
-## Usage Example
-
-```lean
-import Reactive
-
-open Reactive
-open Reactive.Host
-
-def example : IO Unit := runSpider do
-  -- Create a triggerable event
-  let (clickEvent, fireClick) ← newTriggerEvent (t := Spider) (a := Unit)
-
-  -- Hold a click count
-  let clickCount ← foldDyn (fun _ n => n + 1) 0 clickEvent
-
-  -- Subscribe to changes
-  let _ ← liftM (m := IO) <| clickCount.updated.subscribe fun n =>
-    IO.println s!"Click count: {n}"
-
-  -- Fire some events
-  liftM (m := IO) <| fireClick ()
-  liftM (m := IO) <| fireClick ()
-  liftM (m := IO) <| fireClick ()
-
-  pure ()
+```
+Reactive/
+├── Core/           # Event, Behavior, Dynamic, SubscriptionScope
+├── Class/          # MonadSample, MonadHold, TriggerEvent, Adjustable
+├── Combinators/    # Event/Behavior/Dynamic combinators, Switch
+├── Host/Spider.lean # IO-based runtime (SpiderM monad)
+└── Proofs/         # Formal verification (monad laws, propagation)
 ```
 
-## Key Design Patterns
-
-### Timeline Phantom Type
-
-All types are parameterized by a timeline `t` for type-safe separation:
-```lean
-def Event (t : Type) (a : Type) : Type
-def Behavior (t : Type) (a : Type) : Type
-def Dynamic (t : Type) (a : Type) : Type
-```
-
-### Hybrid Push-Pull
-
-- Events are push-based (subscribers notified when fired)
-- Behaviors are pull-based (value computed on sample)
-- Dynamics combine both (push notification + pull value)
-
-### Height-Based Ordering
-
-Nodes have height for topological ordering to prevent glitches. Derived nodes have higher heights than their sources.
+## Key Gotchas
 
 ### ForIn Instances for Custom Monads
 
-**Important**: When defining custom monads that wrap `SpiderM` (e.g., via `ReaderT`), you must define an explicit `ForIn` instance. Without one, Lean's synthesized instance may cause infinite loops in `for` loops.
+**Critical**: When defining monads that wrap `SpiderM` (e.g., via `ReaderT`), you must define an explicit `ForIn` instance. Without one, Lean's synthesized instance may cause infinite loops.
 
 ```lean
--- Example: ReactiveM wraps SpiderM with a reader context
 abbrev ReactiveM := ReaderT ReactiveEvents SpiderM
 
--- REQUIRED: Explicit ForIn instance to avoid hangs
+-- REQUIRED: Explicit ForIn instance
 instance [ForIn SpiderM ρ α] : ForIn ReactiveM ρ α where
   forIn x init f := fun ctx => ForIn.forIn x init fun a b => f a b ctx
 ```
 
-`SpiderM` already has an explicit `ForIn` instance that delegates to IO. Any monad transformer stacked on top needs its own instance that properly threads through the context.
+### SpiderM Lifting
+
+`SpiderM` is a structure, not a type alias. To run IO:
+
+```lean
+SpiderM.liftIO (someIOAction)
+```
+
+To construct a SpiderM action that captures the environment:
+
+```lean
+let action : SpiderM Unit := ⟨fun env => do
+  -- env.currentScope for subscription management
+  -- env.ctx for timeline context
+  someIOAction
+⟩
+```
+
+### Event Subscription Cleanup
+
+Use `SubscriptionScope` for automatic cleanup:
+
+```lean
+let scope ← SubscriptionScope.new
+let unsub ← event.subscribe callback
+scope.register unsub
+-- Later: scope.dispose cleans up all subscriptions
+```
+
+SpiderM tracks a `currentScope` in its environment for automatic registration.
 
 ## Testing
 
-Tests use the Crucible framework. See `ReactiveTests/` for examples.
+Tests use Crucible framework in `ReactiveTests/`. Key test files:
+- `EventTests.lean`, `BehaviorTests.lean`, `DynamicTests.lean` - Core type tests
+- `SwitchTests.lean` - Switching combinator tests
+- `PropagationTests.lean` - Event propagation ordering
+- `ScopeTests.lean` - Subscription scope lifecycle

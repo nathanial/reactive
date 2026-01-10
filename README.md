@@ -15,7 +15,7 @@ Reactive provides three core abstractions for building reactive applications:
 Add to your `lakefile.lean`:
 
 ```lean
-require reactive from git "https://github.com/nathanial/reactive" @ "v0.0.1"
+require reactive from git "https://github.com/nathanial/reactive" @ "v0.0.4"
 ```
 
 ## Quick Start
@@ -162,6 +162,31 @@ switchDyn dynamicOfEvents
 
 -- Switch behaviors
 switchBehavior behaviorOfBehaviors
+```
+
+### SpiderM Combinators
+
+These work in `SpiderM` context without explicit `TimelineCtx`:
+
+```lean
+-- Transform/filter events
+Event.mapM (· * 2) event           -- SpiderM (Event Spider Nat)
+Event.filterM (· > 0) event        -- SpiderM (Event Spider Nat)
+Event.voidM event                  -- SpiderM (Event Spider Unit)
+
+-- Execute IO effects when event fires
+performEvent_ (event.map' fun x => IO.println s!"Got: {x}")
+```
+
+### Subscription Scopes
+
+Manage subscription lifetimes with hierarchical scopes:
+
+```lean
+let scope ← SubscriptionScope.new
+scope.register unsubscribeAction    -- Register cleanup
+let child ← scope.child             -- Create child scope
+scope.dispose                       -- Disposes children first, then self
 ```
 
 ## Architecture
