@@ -130,6 +130,25 @@ test "Dynamic.apM applies function dynamic" := do
     pure (v0, v1)
   shouldBe result (11, 20)
 
+test "Dynamic.Builder supports Functor and Applicative" := do
+  let result ← runSpider do
+    let (e1, t1) ← newTriggerEvent (t := Spider) (a := Nat)
+    let (e2, t2) ← newTriggerEvent (t := Spider) (a := Nat)
+    let d1 ← holdDyn 2 e1
+    let d2 ← holdDyn 5 e2
+    let ctx ← SpiderM.getTimelineCtx
+    let built ← SpiderM.liftIO <|
+      Dynamic.Builder.run ctx do
+        (fun a b => a * 2 + b) <$> Dynamic.Builder.of d1 <*> Dynamic.Builder.of d2
+
+    let v0 ← SpiderM.liftIO <| built.sample
+    SpiderM.liftIO <| t1 4
+    let v1 ← SpiderM.liftIO <| built.sample
+    SpiderM.liftIO <| t2 10
+    let v2 ← SpiderM.liftIO <| built.sample
+    pure (v0, v1, v2)
+  shouldBe result (9, 13, 18)
+
 test "Dynamic.zipWith3M combines three dynamics" := do
   let result ← runSpider do
     let (e1, t1) ← newTriggerEvent (t := Spider) (a := Nat)

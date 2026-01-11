@@ -87,12 +87,31 @@ def mapWithId [Timeline t] [BEq b] (f : a → b) (da : Dynamic t a) (nodeId : No
       trigger newB
   pure ⟨valueRef, changeEvent, trigger⟩
 
+/-- Map a function over a Dynamic's values (with explicit NodeId).
+    Fires on every source update (no BEq-based deduplication). -/
+def mapWithIdRaw [Timeline t] (f : a → b) (da : Dynamic t a) (nodeId : NodeId) : IO (Dynamic t b) := do
+  let initial ← da.sample
+  let valueRef ← IO.mkRef (f initial)
+  let (changeEvent, trigger) ← Event.newTriggerWithId nodeId
+  let _ ← Reactive.Event.subscribe da.changeEvent fun newA => do
+    let newB := f newA
+    valueRef.set newB
+    trigger newB
+  pure ⟨valueRef, changeEvent, trigger⟩
+
 /-- Map a function over a Dynamic's values.
     Requires TimelineCtx for type-safe timeline separation.
     Requires BEq to detect duplicate values. -/
 def map [Timeline t] [BEq b] (ctx : TimelineCtx t) (f : a → b) (da : Dynamic t a) : IO (Dynamic t b) := do
   let nodeId ← ctx.freshNodeId
   mapWithId f da nodeId
+
+/-- Map a function over a Dynamic's values.
+    Requires TimelineCtx for type-safe timeline separation.
+    Fires on every source update (no BEq-based deduplication). -/
+def mapRaw [Timeline t] (ctx : TimelineCtx t) (f : a → b) (da : Dynamic t a) : IO (Dynamic t b) := do
+  let nodeId ← ctx.freshNodeId
+  mapWithIdRaw f da nodeId
 
 /-- Combine two Dynamics with a function (with explicit NodeId).
     Only fires the change event when the combined value actually changes.
@@ -124,12 +143,44 @@ def zipWithId [Timeline t] [BEq c] (f : a → b → c) (da : Dynamic t a) (db : 
 
   pure ⟨valueRef, changeEvent, trigger⟩
 
+/-- Combine two Dynamics with a function (with explicit NodeId).
+    Fires on every source update (no BEq-based deduplication). -/
+def zipWithIdRaw [Timeline t] (f : a → b → c) (da : Dynamic t a) (db : Dynamic t b)
+    (nodeId : NodeId) : IO (Dynamic t c) := do
+  let a ← da.sample
+  let b ← db.sample
+  let valueRef ← IO.mkRef (f a b)
+  let (changeEvent, trigger) ← Event.newTriggerWithId nodeId
+
+  -- Subscribe to changes in da
+  let _ ← Reactive.Event.subscribe da.changeEvent fun newA => do
+    let currentB ← db.sample
+    let newC := f newA currentB
+    valueRef.set newC
+    trigger newC
+
+  -- Subscribe to changes in db
+  let _ ← Reactive.Event.subscribe db.changeEvent fun newB => do
+    let currentA ← da.sample
+    let newC := f currentA newB
+    valueRef.set newC
+    trigger newC
+
+  pure ⟨valueRef, changeEvent, trigger⟩
+
 /-- Combine two Dynamics with a function.
     Requires TimelineCtx for type-safe timeline separation.
     Requires BEq to detect duplicate values. -/
 def zipWith [Timeline t] [BEq c] (ctx : TimelineCtx t) (f : a → b → c) (da : Dynamic t a) (db : Dynamic t b) : IO (Dynamic t c) := do
   let nodeId ← ctx.freshNodeId
   zipWithId f da db nodeId
+
+/-- Combine two Dynamics with a function.
+    Requires TimelineCtx for type-safe timeline separation.
+    Fires on every source update (no BEq-based deduplication). -/
+def zipWithRaw [Timeline t] (ctx : TimelineCtx t) (f : a → b → c) (da : Dynamic t a) (db : Dynamic t b) : IO (Dynamic t c) := do
+  let nodeId ← ctx.freshNodeId
+  zipWithIdRaw f da db nodeId
 
 /-- Pair two Dynamics (with explicit NodeId). -/
 def zipId [Timeline t] [BEq a] [BEq b] (da : Dynamic t a) (db : Dynamic t b) (nodeId : NodeId) : IO (Dynamic t (a × b)) :=

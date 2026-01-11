@@ -67,6 +67,41 @@ def changes [Timeline t] (ctx : TimelineCtx t) (d : Dynamic t a) : IO (Event t (
   let nodeId ← ctx.freshNodeId
   changesId d nodeId
 
+/-- Builder monad for creating derived Dynamics with Functor/Applicative syntax.
+    Carries a TimelineCtx for NodeId allocation.
+    Note: uses raw Dynamic combinators (no BEq-based deduplication). -/
+abbrev Builder (t : Type) [Timeline t] (a : Type) := ReaderT (TimelineCtx t) IO (Dynamic t a)
+
+namespace Builder
+
+variable {t : Type} [Timeline t]
+
+/-- Run a Dynamic builder with an explicit TimelineCtx. -/
+def run (ctx : TimelineCtx t) (m : Builder t a) : IO (Dynamic t a) :=
+  m ctx
+
+/-- Lift an existing Dynamic into the builder. -/
+def of (d : Dynamic t a) : Builder t a :=
+  fun _ => pure d
+
+/-- Lift an IO-built Dynamic into the builder. -/
+def liftIO (action : IO (Dynamic t a)) : Builder t a :=
+  fun _ => action
+
+instance : Functor (Builder t) where
+  map f m := fun ctx => do
+    let d ← m ctx
+    Dynamic.mapRaw ctx f d
+
+instance : Applicative (Builder t) where
+  pure x := fun ctx => Dynamic.constant ctx x
+  seq mf mx := fun ctx => do
+    let df ← mf ctx
+    let dx ← (mx ()) ctx
+    Dynamic.zipWithRaw ctx (fun f x => f x) df dx
+
+end Builder
+
 end Dynamic
 
 end Reactive
