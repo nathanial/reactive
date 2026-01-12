@@ -661,6 +661,10 @@ def mapMaybeM (f : a → Option b) (e : Event Spider a) : SpiderM (Event Spider 
 def voidM (e : Event Spider a) : SpiderM (Event Spider Unit) :=
   mapM (fun _ => ()) e
 
+/-- Map an event to a constant value, ignoring the original values. -/
+def mapConstM (b : β) (e : Event Spider α) : SpiderM (Event Spider β) :=
+  mapM (fun _ => b) e
+
 /-- Merge two Events, auto-allocating NodeId and registering with scope. -/
 def mergeM (e1 : Event Spider a) (e2 : Event Spider a) : SpiderM (Event Spider a) := ⟨fun env => do
   let _ ← env.incrementDepth "Event.mergeM"
@@ -972,6 +976,11 @@ def filter' (e : Event Spider a) (p : a → Bool) : SpiderM (Event Spider a) :=
     Enables: `event.mapMaybe' f` -/
 def mapMaybe' (e : Event Spider a) (f : a → Option b) : SpiderM (Event Spider b) :=
   mapMaybeM f e
+
+/-- Map to a constant value (fluent style).
+    Enables: `event.mapConst' value` -/
+def mapConst' (e : Event Spider α) (b : β) : SpiderM (Event Spider β) :=
+  mapConstM b e
 
 /-- Merge with another Event (fluent style).
     Enables: `event1.merge' event2` -/

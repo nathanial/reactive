@@ -653,6 +653,35 @@ test "Event.mapM cleans up on scope dispose" := do
   let disposed ← disposedRef.get
   shouldBe disposed true
 
+test "Event.mapConstM maps all values to constant" := do
+  let result ← runSpider do
+    let (event, trigger) ← newTriggerEvent (t := Spider) (a := Nat)
+    let constEvent ← Event.mapConstM "fired" event
+
+    let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List String)
+    let _ ← SpiderM.liftIO <| constEvent.subscribe fun s =>
+      receivedRef.modify (· ++ [s])
+
+    SpiderM.liftIO <| trigger 1
+    SpiderM.liftIO <| trigger 42
+    SpiderM.liftIO <| trigger 999
+    SpiderM.liftIO receivedRef.get
+  shouldBe result ["fired", "fired", "fired"]
+
+test "Event.mapConst' maps all values to constant (fluent style)" := do
+  let result ← runSpider do
+    let (event, trigger) ← newTriggerEvent (t := Spider) (a := String)
+    let constEvent ← Event.mapConst' event 100
+
+    let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
+    let _ ← SpiderM.liftIO <| constEvent.subscribe fun n =>
+      receivedRef.modify (· ++ [n])
+
+    SpiderM.liftIO <| trigger "hello"
+    SpiderM.liftIO <| trigger "world"
+    SpiderM.liftIO receivedRef.get
+  shouldBe result [100, 100]
+
 #generate_tests
 
 end ReactiveTests.EventTests
