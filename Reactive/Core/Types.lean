@@ -81,7 +81,9 @@ structure Frame where
 /-! ## Propagation Queue Infrastructure
 
 The propagation queue enables glitch-free event handling by processing events
-in height order within each frame. -/
+in height order within each frame.
+
+Implementation uses a binary min-heap for O(log n) insert and pop operations. -/
 
 /-- A pending event occurrence waiting to be propagated.
     Stores the height and nodeId for ordering, plus the fire action as a closure. -/
@@ -106,9 +108,9 @@ instance : LE PendingFire where
   le a b := compare a b != .gt
 
 /-- Propagation state during a frame.
-    The pending array is kept sorted by (height, nodeId). -/
+    Uses a binary min-heap for efficient priority queue operations. -/
 structure PropagationQueue where
-  /-- Priority queue of pending fires, ordered by (height, nodeId) -/
+  /-- Binary min-heap of pending fires, ordered by (height, nodeId) -/
   pending : Array PendingFire := #[]
   /-- Pending fires for the next frame (used by delayFrame) -/
   nextFramePending : Array PendingFire := #[]
@@ -118,28 +120,84 @@ structure PropagationQueue where
 
 namespace PropagationQueue
 
-/-- Find insertion index for a pending fire in sorted array.
-    Uses stable insertion: equal elements are inserted after existing ones (FIFO). -/
-private def findInsertIdx (arr : Array PendingFire) (p : PendingFire) : Nat :=
-  -- Linear search for simplicity; could optimize to binary search later
-  -- Use != .gt (i.e., ≤) for stable insertion
-  arr.foldl (init := 0) fun idx existing =>
-    if compare existing p != .gt then idx + 1 else idx
+/-! ### Binary Heap Operations
 
-/-- Insert a pending fire into the sorted queue -/
-def insert (q : PropagationQueue) (p : PendingFire) : PropagationQueue :=
-  let idx := findInsertIdx q.pending p
-  -- Build new array with element inserted at idx
-  let before := q.pending.extract 0 idx
-  let after := q.pending.extract idx q.pending.size
-  { q with pending := before.push p ++ after }
+Array-based binary min-heap where:
+- Parent of node i: (i - 1) / 2
+- Left child of i: 2*i + 1
+- Right child of i: 2*i + 2
 
-/-- Pop the minimum (lowest height) pending fire -/
-def popMin? (q : PropagationQueue) : Option (PendingFire × PropagationQueue) :=
-  if h : 0 < q.pending.size then
-    some (q.pending[0], { q with pending := q.pending.eraseIdx 0 })
+Heap property: parent ≤ children (for all nodes) -/
+
+/-- Get parent index -/
+@[inline] private def parentIdx (i : Nat) : Nat := (i - 1) / 2
+
+/-- Get left child index -/
+@[inline] private def leftChildIdx (i : Nat) : Nat := 2 * i + 1
+
+/-- Get right child index -/
+@[inline] private def rightChildIdx (i : Nat) : Nat := 2 * i + 2
+
+/-- Swap two elements in an array (unchecked for performance) -/
+@[inline] private def swap (arr : Array PendingFire) (i j : Nat) : Array PendingFire :=
+  let vi := arr[i]!
+  let vj := arr[j]!
+  (arr.set! i vj).set! j vi
+
+/-- Sift up: restore heap property after inserting at end.
+    Bubbles the element at index i up until heap property is satisfied.
+    O(log n) -/
+partial def siftUp (arr : Array PendingFire) (i : Nat) : Array PendingFire :=
+  if i == 0 then arr
   else
+    let pi := parentIdx i
+    if pi < arr.size && i < arr.size then
+      if compare arr[i]! arr[pi]! == .lt then
+        siftUp (swap arr i pi) pi
+      else arr
+    else arr
+
+/-- Sift down: restore heap property after replacing root.
+    Bubbles the element at index i down until heap property is satisfied.
+    O(log n) -/
+partial def siftDown (arr : Array PendingFire) (i : Nat) : Array PendingFire :=
+  let left := leftChildIdx i
+  let right := rightChildIdx i
+  let size := arr.size
+
+  -- Find smallest among node and its children
+  let smallest :=
+    let s1 := if left < size && compare arr[left]! arr[i]! == .lt then left else i
+    if right < size && compare arr[right]! arr[s1]! == .lt then right else s1
+
+  -- If smallest is not the current node, swap and continue
+  if smallest != i && smallest < size then
+    siftDown (swap arr i smallest) smallest
+  else
+    arr
+
+/-- Insert a pending fire into the heap. O(log n) -/
+def insert (q : PropagationQueue) (p : PendingFire) : PropagationQueue :=
+  let arr := q.pending.push p
+  let arr := siftUp arr (arr.size - 1)
+  { q with pending := arr }
+
+/-- Pop the minimum (lowest height) pending fire. O(log n) -/
+def popMin? (q : PropagationQueue) : Option (PendingFire × PropagationQueue) :=
+  if q.pending.size == 0 then
     none
+  else
+    let minElem := q.pending[0]!
+    if q.pending.size == 1 then
+      -- Only one element, just remove it
+      some (minElem, { q with pending := #[] })
+    else
+      -- Move last element to root and sift down
+      let last := q.pending.back!
+      let arr := q.pending.pop  -- Remove last
+      let arr := arr.set! 0 last  -- Put it at root
+      let arr := siftDown arr 0  -- Restore heap property
+      some (minElem, { q with pending := arr })
 
 /-- Check if the queue is empty -/
 def isEmpty (q : PropagationQueue) : Bool := q.pending.isEmpty
