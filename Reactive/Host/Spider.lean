@@ -90,36 +90,40 @@ def decrementDepth (env : SpiderEnv) : IO Unit := do
     Errors in subscriber callbacks are handled by the configured error handler.
     Throws if total events processed exceeds maxPropagationDepth (detects infinite event loops). -/
 partial def drainQueue (env : SpiderEnv) : IO Unit := do
-  let q ← env.propagationQueue.get
-  match q.popMin? with
-  | none =>
-    -- Current frame empty, check for next-frame events (from delayFrame)
-    if q.nextFramePending.isEmpty then
-      return ()  -- All done
-    else
-      -- Start new sub-frame with next-frame events
-      env.propagationQueue.set {
-        pending := q.nextFramePending,
-        nextFramePending := #[],
-        inFrame := true
-      }
-      env.drainQueue
-  | some (pending, q') =>
-    -- Check total events processed for infinite loop detection
-    let count ← env.propagationDepth.modifyGet fun d => (d + 1, d + 1)
-    if count > maxPropagationDepth then
-      throw <| IO.userError s!"[Reactive] Infinite loop detected during event propagation ({count} events processed, exceeded {maxPropagationDepth}). This usually means an event subscriber is triggering events recursively."
+  -- Cache error handler outside hot loop
+  let errorHandler ← env.errorHandler.get
+  loop errorHandler 0
+where
+  loop (errorHandler : PropagationErrorHandler) (count : Nat) : IO Unit := do
+    let q ← env.propagationQueue.get
+    match q.popMin? with
+    | none =>
+      -- Current frame empty, check for next-frame events (from delayFrame)
+      if q.nextFramePending.isEmpty then
+        return ()  -- All done
+      else
+        -- Start new sub-frame with next-frame events
+        env.propagationQueue.set {
+          pending := q.nextFramePending,
+          nextFramePending := #[],
+          inFrame := true
+        }
+        loop errorHandler count
+    | some (pending, q') =>
+      -- Check total events processed for infinite loop detection
+      let count' := count + 1
+      if count' > maxPropagationDepth then
+        throw <| IO.userError s!"[Reactive] Infinite loop detected during event propagation ({count'} events processed, exceeded {maxPropagationDepth}). This usually means an event subscriber is triggering events recursively."
 
-    env.propagationQueue.set q'
-    -- Execute the fire action with error handling
-    try
-      pending.fire
-    catch e =>
-      let handler ← env.errorHandler.get
-      let shouldContinue ← handler e
-      if !shouldContinue then
-        throw e
-    env.drainQueue  -- Continue draining
+      env.propagationQueue.set q'
+      -- Execute the fire action with error handling
+      try
+        pending.fire
+      catch e =>
+        let shouldContinue ← errorHandler e
+        if !shouldContinue then
+          throw e
+      loop errorHandler count'
 
 /-- Execute an action within a propagation frame.
     If already in a frame, just runs the action (it will enqueue).

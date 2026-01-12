@@ -74,24 +74,26 @@ def fire (node : EventNode a) (value : a) : IO Unit := do
   match ← getPropagationContext with
   | none =>
     -- No propagation context, fire immediately
+    fireImmediate node value
+  | some queueRef =>
+    -- Use modifyGet to atomically check inFrame and update queue
+    let wasEnqueued ← queueRef.modifyGet fun q =>
+      if q.inFrame then
+        -- We're in a frame, enqueue for height-ordered processing
+        let action : IO Unit := fireImmediate node value
+        let pending : PendingFire := ⟨node.height, node.nodeId, action⟩
+        (true, q.insert pending)
+      else
+        (false, q)
+    if !wasEnqueued then
+      -- Context exists but not in frame, fire immediately
+      fireImmediate node value
+where
+  /-- Fire immediately without queueing - calls all subscribers -/
+  @[inline] fireImmediate (node : EventNode a) (value : a) : IO Unit := do
     let subs ← node.subscribers.get
     for (_, callback) in subs do
       callback value
-  | some queueRef =>
-    let q ← queueRef.get
-    if q.inFrame then
-      -- We're in a frame, enqueue for height-ordered processing
-      let action : IO Unit := do
-        let subs ← node.subscribers.get
-        for (_, callback) in subs do
-          callback value
-      let pending : PendingFire := ⟨node.height, node.nodeId, action⟩
-      queueRef.set (q.insert pending)
-    else
-      -- Context exists but not in frame, fire immediately
-      let subs ← node.subscribers.get
-      for (_, callback) in subs do
-        callback value
 
 /-- Get the number of subscribers -/
 def subscriberCount (node : EventNode a) : IO Nat := do
