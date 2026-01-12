@@ -574,6 +574,43 @@ def changesM (d : Dynamic Spider a) : SpiderM (Event Spider (a × a)) := ⟨fun 
   env.decrementDepth
   pure result⟩
 
+/-- Switch/join a Dynamic of Dynamics into a single Dynamic.
+    The result updates when either the outer changes or the current inner changes.
+    All subscriptions are registered with the current scope. -/
+def switchM (dd : Dynamic Spider (Dynamic Spider a)) : SpiderM (Dynamic Spider a) := ⟨fun env => do
+  let _ ← env.incrementDepth "Dynamic.switchM"
+  let initialInner ← dd.sample
+  let initialValue ← initialInner.sample
+  let (result, updateResult) ← createDynamic env.timelineCtx initialValue
+  let currentUnsubRef ← IO.mkRef (pure () : IO Unit)
+
+  let subscribeToInner := fun (inner : Dynamic Spider a) => do
+    let oldUnsub ← currentUnsubRef.get
+    oldUnsub
+    let unsub ← Reactive.Event.subscribe inner.updated fun newValue => updateResult newValue
+    currentUnsubRef.set unsub
+    let currentValue ← inner.sample
+    updateResult currentValue
+
+  let unsubInner ← Reactive.Event.subscribe initialInner.updated fun newValue => updateResult newValue
+  currentUnsubRef.set unsubInner
+
+  let unsubOuter ← Reactive.Event.subscribe dd.updated subscribeToInner
+
+  -- Register both the outer subscription and a cleanup for the current inner
+  env.currentScope.register unsubOuter
+  env.currentScope.register do
+    let unsub ← currentUnsubRef.get
+    unsub
+
+  env.decrementDepth
+  pure result⟩
+
+/-- Switch a Dynamic of Dynamics (fluent style).
+    Enables: `dynOfDyn.switch'` -/
+def switch' (dd : Dynamic Spider (Dynamic Spider a)) : SpiderM (Dynamic Spider a) :=
+  switchM dd
+
 end Dynamic
 
 /-! ## Behavior SpiderM Combinators
@@ -844,6 +881,38 @@ def accumulateM (f : a → b → b) (initial : b) (e : Event Spider a)
 
 /-- Alias for accumulateM (familiar name from other FRP libraries). -/
 abbrev scanM := @accumulateM
+
+/-- Switch events based on a Dynamic selector.
+    Fires from whichever event the Dynamic currently holds.
+    All subscriptions are registered with the current scope. -/
+def switchDynM (de : Dynamic Spider (Event Spider a)) : SpiderM (Event Spider a) := ⟨fun env => do
+  let _ ← env.incrementDepth "Event.switchDynM"
+  let nodeId ← env.timelineCtx.freshNodeId
+  let derived ← Event.newNodeWithId nodeId ⟨0⟩
+  let currentUnsubRef ← IO.mkRef (pure () : IO Unit)
+
+  let initialEvent ← de.sample
+  let unsub ← Reactive.Event.subscribe initialEvent derived.fire
+  currentUnsubRef.set unsub
+
+  let unsubOuter ← Reactive.Event.subscribe de.updated fun newEvent => do
+    let oldUnsub ← currentUnsubRef.get
+    oldUnsub
+    let unsub ← Reactive.Event.subscribe newEvent derived.fire
+    currentUnsubRef.set unsub
+
+  env.currentScope.register unsubOuter
+  env.currentScope.register do
+    let unsub ← currentUnsubRef.get
+    unsub
+
+  env.decrementDepth
+  pure derived⟩
+
+/-- Switch events based on a Dynamic selector (fluent style).
+    Enables: `dynEvent.switchDyn'` -/
+def switchDyn' (de : Dynamic Spider (Event Spider a)) : SpiderM (Event Spider a) :=
+  switchDynM de
 
 end Event
 

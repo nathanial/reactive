@@ -152,6 +152,56 @@ test "switchBehavior samples inner behavior" := do
 
   shouldBe result (10, 20)
 
+test "Dynamic.switchM propagates inner dynamic changes with scope" := do
+  let result ← runSpider do
+    let (e1, t1) ← newTriggerEvent (t := Spider) (a := Nat)
+    let (e2, t2) ← newTriggerEvent (t := Spider) (a := Nat)
+    let inner1 ← holdDyn 10 e1
+    let inner2 ← holdDyn 20 e2
+
+    let (switchEvent, switchTrigger) ← newTriggerEvent (t := Spider) (a := Dynamic Spider Nat)
+    let outer ← holdDyn inner1 switchEvent
+
+    -- Use new SpiderM wrapper
+    let switched ← Dynamic.switchM outer
+
+    let v0 ← SpiderM.liftIO <| switched.sample
+    SpiderM.liftIO <| t1 15
+    let v1 ← SpiderM.liftIO <| switched.sample
+    SpiderM.liftIO <| switchTrigger inner2
+    let v2 ← SpiderM.liftIO <| switched.sample
+    SpiderM.liftIO <| t2 25
+    let v3 ← SpiderM.liftIO <| switched.sample
+
+    pure (v0, v1, v2, v3)
+
+  shouldBe result (10, 15, 20, 25)
+
+test "Event.switchDynM switches events with scope" := do
+  let result ← runSpider do
+    let (e1, t1) ← newTriggerEvent (t := Spider) (a := Nat)
+    let (e2, t2) ← newTriggerEvent (t := Spider) (a := Nat)
+
+    let (switchEvent, switchTrigger) ← newTriggerEvent (t := Spider) (a := Event Spider Nat)
+    let dynEvent ← holdDyn e1 switchEvent
+
+    -- Use new SpiderM wrapper
+    let switched ← Event.switchDynM dynEvent
+
+    let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
+    let _ ← Event.subscribeM switched fun n =>
+      receivedRef.modify (· ++ [n])
+
+    SpiderM.liftIO <| t1 1
+    SpiderM.liftIO <| t1 2
+    SpiderM.liftIO <| switchTrigger e2
+    SpiderM.liftIO <| t1 999  -- ignored
+    SpiderM.liftIO <| t2 3
+
+    SpiderM.liftIO receivedRef.get
+
+  shouldBe result [1, 2, 3]
+
 #generate_tests
 
 end ReactiveTests.SwitchTests
