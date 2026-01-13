@@ -4,6 +4,7 @@
   Spider: An IO-based push runtime for the Reactive FRP library.
   Named after Reflex's Spider host.
 -/
+import Lean
 import Reactive.Core
 import Reactive.Class
 import Reactive.Combinators
@@ -665,6 +666,14 @@ def mapM (f : a → b) (e : Event Spider a) : SpiderM (Event Spider b) := ⟨fun
   env.decrementDepth
   pure derived⟩
 
+/-- Map a constant addition over an Event, fusing successive add-const maps. -/
+def mapAddConstM [HAdd a a a] (c : a) (e : Event Spider a) : SpiderM (Event Spider a) := ⟨fun env => do
+  let _ ← env.incrementDepth "Event.mapAddConstM"
+  let nodeId ← env.timelineCtx.freshNodeId
+  let derived ← Event.mapAddConstWithId c e nodeId
+  env.decrementDepth
+  pure derived⟩
+
 /-- Filter an Event by a predicate, auto-allocating NodeId and registering with scope. -/
 def filterM (p : a → Bool) (e : Event Spider a) : SpiderM (Event Spider a) := ⟨fun env => do
   let _ ← env.incrementDepth "Event.filterM"
@@ -909,6 +918,24 @@ def switchDyn' (de : Dynamic Spider (Event Spider a)) : SpiderM (Event Spider a)
   switchDynM de
 
 end Event
+
+/-! ## Map Fusion Macros
+
+These macros rewrite common add-constant map patterns to the fused
+`Event.mapAddConstM` combinator. This avoids deep chains of `x + c`
+calls by collapsing constants at construction time.
+
+Note: Fusion assumes `x + c1 + c2` is equivalent to `x + (c1 + c2)`.
+-/
+
+set_option linter.unusedVariables false in
+macro_rules
+| `(Event.mapM (· + $c) $e) => `(Event.mapAddConstM $c $e)
+| `(Event.mapM (fun $x => $x + $c) $e) => `(Event.mapAddConstM $c $e)
+| `(Event.mapM Nat.succ $e) => `(Event.mapAddConstM 1 $e)
+| `(Reactive.Host.Event.mapM (· + $c) $e) => `(Reactive.Host.Event.mapAddConstM $c $e)
+| `(Reactive.Host.Event.mapM (fun $x => $x + $c) $e) => `(Reactive.Host.Event.mapAddConstM $c $e)
+| `(Reactive.Host.Event.mapM Nat.succ $e) => `(Reactive.Host.Event.mapAddConstM 1 $e)
 
 /-! ## Temporal Combinators
 

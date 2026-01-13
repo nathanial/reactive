@@ -2,7 +2,7 @@ import Lake
 open Lake DSL
 
 package reactive where
-  version := v!"0.1.0"
+  version := v!"0.1.1"
 
 require crucible from git "https://github.com/nathanial/crucible" @ "v0.0.7"
 require plausible from git

@@ -56,6 +56,10 @@ structure EventNode (a : Type) where
   activeCount : IO.Ref Nat
   /-- Map-chain connection for fusion (connects to upstream with composed map) -/
   mapConnect : IO.Ref (Option (Subscriber a → IO (IO Unit)))
+  /-- Base connection for map-add fusion (connects upstream before add-const). -/
+  mapAddBaseConnect : IO.Ref (Option (Subscriber a → IO (IO Unit)))
+  /-- Accumulated add-constant value for map-add fusion. -/
+  mapAddConst : IO.Ref (Option a)
   /-- Active upstream subscription when this map node is connected -/
   upstreamUnsub : IO.Ref (Option (IO Unit))
   /-- Counter for generating unique subscriber IDs -/
@@ -68,6 +72,8 @@ def new (nodeId : NodeId) (height : Height := ⟨0⟩) : IO (EventNode a) := do
   let subs ← IO.mkRef #[]
   let activeCount ← IO.mkRef 0
   let mapConnect ← IO.mkRef none
+  let mapAddBaseConnect ← IO.mkRef none
+  let mapAddConst ← IO.mkRef none
   let upstreamUnsub ← IO.mkRef none
   let nextId ← IO.mkRef 0
   pure {
@@ -76,6 +82,8 @@ def new (nodeId : NodeId) (height : Height := ⟨0⟩) : IO (EventNode a) := do
     subscribers := subs,
     activeCount := activeCount,
     mapConnect := mapConnect,
+    mapAddBaseConnect := mapAddBaseConnect,
+    mapAddConst := mapAddConst,
     upstreamUnsub := upstreamUnsub,
     nextSubId := nextId
   }
@@ -306,6 +314,36 @@ def mapWithId [Timeline t] (f : a → b) (source : Event t a) (derivedNodeId : N
     derived.node.mapConnect.set (some composed)
     pure derived
 
+/-- Map a constant addition over event values, with fusion across successive add-const maps.
+    This collapses chains of `x + c` into a single add at the endpoint.
+    Requires homogeneous addition. -/
+def mapAddConstWithId [Timeline t] [HAdd a a a]
+    (c : a) (source : Event t a) (derivedNodeId : NodeId) : IO (Event t a) := do
+  let derived ← Event.newNodeWithId derivedNodeId (source.height.inc)
+
+  -- Prefer base connect if available to avoid stacking add-const wrappers.
+  let baseConnect? ← source.node.mapAddBaseConnect.get
+  let baseConnect ←
+    match baseConnect? with
+    | some connect => pure connect
+    | none =>
+      match ← source.node.mapConnect.get with
+      | some connect => pure connect
+      | none => pure (fun cb => source.node.subscribe cb)
+
+  let totalConst ←
+    match ← source.node.mapAddConst.get with
+    | some existing => pure (existing + c)
+    | none => pure c
+
+  derived.node.mapAddBaseConnect.set (some baseConnect)
+  derived.node.mapAddConst.set (some totalConst)
+
+  let composed : (Subscriber a → IO (IO Unit)) :=
+    fun cb => baseConnect (fun a => cb (a + totalConst))
+  derived.node.mapConnect.set (some composed)
+  pure derived
+
 /-- Map a function over event values.
     Creates a new derived event that transforms values from the source.
 
@@ -319,6 +357,12 @@ def map [Timeline t] (ctx : TimelineCtx t) (f : a → b) (source : Event t a) : 
   do
     let nodeId ← ctx.freshNodeId
     mapWithId f source nodeId
+
+/-- Map a constant addition over event values, with fusion across successive add-const maps. -/
+def mapAddConst [Timeline t] [HAdd a a a] (ctx : TimelineCtx t)
+    (c : a) (source : Event t a) : IO (Event t a) := do
+  let nodeId ← ctx.freshNodeId
+  mapAddConstWithId c source nodeId
 
 /-- Filter event occurrences by a predicate (with explicit NodeId).
     Only values that satisfy the predicate pass through. -/
