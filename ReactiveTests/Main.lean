@@ -16,6 +16,7 @@ import ReactiveTests.IntegrationHelperTests
 import ReactiveTests.FluentApiTests
 import ReactiveTests.TopologyTests
 import ReactiveTests.PerformanceTests
+import ReactiveTests.QueueBenchmarks
 
 open Crucible
 
