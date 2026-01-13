@@ -661,8 +661,7 @@ protected def subscribeM (e : Event Spider a) (callback : Subscriber a) : Spider
 def mapM (f : a → b) (e : Event Spider a) : SpiderM (Event Spider b) := ⟨fun env => do
   let _ ← env.incrementDepth "Event.mapM"
   let nodeId ← env.timelineCtx.freshNodeId
-  let derived ← Event.newNodeWithId nodeId (e.height.inc)
-  let _ ← Reactive.Event.subscribeMapScoped e derived env.currentScope f
+  let derived ← Event.mapWithId f e nodeId
   env.decrementDepth
   pure derived⟩
 

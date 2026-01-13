@@ -48,8 +48,10 @@ structure EventNode (a : Type) where
   height : Height
   /-- Registered subscribers (generic callbacks) -/
   subscribers : IO.Ref (Array (SubscriberId × Subscriber a))
-  /-- Fast-path map subscribers (used for map chain fusion) -/
-  mapSubscribers : IO.Ref (Array (SubscriberId × Subscriber a))
+  /-- Map-chain connection for fusion (connects to upstream with composed map) -/
+  mapConnect : IO.Ref (Option (Subscriber a → IO (IO Unit)))
+  /-- Active upstream subscription when this map node is connected -/
+  upstreamUnsub : IO.Ref (Option (IO Unit))
   /-- Counter for generating unique subscriber IDs -/
   nextSubId : IO.Ref Nat
 
@@ -58,17 +60,17 @@ namespace EventNode
 /-- Create a new event node -/
 def new (nodeId : NodeId) (height : Height := ⟨0⟩) : IO (EventNode a) := do
   let subs ← IO.mkRef #[]
-  let mapSubs ← IO.mkRef #[]
+  let mapConnect ← IO.mkRef none
+  let upstreamUnsub ← IO.mkRef none
   let nextId ← IO.mkRef 0
-  pure { nodeId, height, subscribers := subs, mapSubscribers := mapSubs, nextSubId := nextId }
-
-/-- Subscribe to this event, returning an unsubscribe action -/
-def subscribe (node : EventNode a) (callback : Subscriber a) : IO (IO Unit) := do
-  let subId ← node.nextSubId.modifyGet fun n => (⟨n⟩, n + 1)
-  node.subscribers.modify (·.push (subId, callback))
-  pure do
-    node.subscribers.modify fun subs =>
-      subs.filter (·.1 != subId)
+  pure {
+    nodeId,
+    height,
+    subscribers := subs,
+    mapConnect := mapConnect,
+    upstreamUnsub := upstreamUnsub,
+    nextSubId := nextId
+  }
 
 /-- Fire this event with a value, notifying all subscribers.
     If a propagation context is active and we're in a frame, the fire is
@@ -94,38 +96,46 @@ where
     let subs ← node.subscribers.get
     for (_, callback) in subs do
       callback value
-    let mapSubs ← node.mapSubscribers.get
-    for (_, callback) in mapSubs do
-      callback value
 
-/-- Propagate a mapped value to a downstream node, skipping map-only nodes. -/
-def propagateMapChain (node : EventNode a) (value : a) : IO Unit := do
+/-- Ensure a map-only node is connected to its root when it gains subscribers. -/
+def ensureConnected (node : EventNode a) : IO Unit := do
+  if (← node.upstreamUnsub.get).isSome then
+    pure ()
+  else
+    match ← node.mapConnect.get with
+    | none => pure ()
+    | some connect => do
+      let unsub ← connect node.fire
+      node.upstreamUnsub.set (some unsub)
+
+/-- Disconnect a map-only node from its root when it has no subscribers. -/
+def maybeDisconnect (node : EventNode a) : IO Unit := do
   let subs ← node.subscribers.get
   if subs.isEmpty then
-    let mapSubs ← node.mapSubscribers.get
-    if mapSubs.isEmpty then
-      pure ()
-    else
-      for (_, callback) in mapSubs do
-        callback value
+    match ← node.upstreamUnsub.get with
+    | none => pure ()
+    | some unsub =>
+      unsub
+      node.upstreamUnsub.set none
   else
-    EventNode.fire node value
+    pure ()
 
-/-- Subscribe with a pure map into a downstream node.
-    This enables fast-path fusion for map-only chains. -/
-def subscribeMap (node : EventNode a) (target : EventNode b) (f : a → b) : IO (IO Unit) := do
+/-- Subscribe to this event, returning an unsubscribe action -/
+def subscribe (node : EventNode a) (callback : Subscriber a) : IO (IO Unit) := do
+  let wasEmpty := (← node.subscribers.get).isEmpty
   let subId ← node.nextSubId.modifyGet fun n => (⟨n⟩, n + 1)
-  let callback : Subscriber a := fun a => propagateMapChain target (f a)
-  node.mapSubscribers.modify (·.push (subId, callback))
+  node.subscribers.modify (·.push (subId, callback))
+  if wasEmpty then
+    ensureConnected node
   pure do
-    node.mapSubscribers.modify fun subs =>
+    node.subscribers.modify fun subs =>
       subs.filter (·.1 != subId)
+    maybeDisconnect node
 
 /-- Get the number of subscribers -/
 def subscriberCount (node : EventNode a) : IO Nat := do
   let subs ← node.subscribers.get
-  let mapSubs ← node.mapSubscribers.get
-  pure (subs.size + mapSubs.size)
+  pure subs.size
 
 end EventNode
 
@@ -228,17 +238,6 @@ protected def subscribeScoped (e : Event t a) (scope : SubscriptionScope)
   scope.register unsub
   pure unsub
 
-/-- Subscribe with a pure map into a downstream event (fast-path for map chains). -/
-protected def subscribeMap (source : Event t a) (target : Event t b) (f : a → b) : IO (IO Unit) :=
-  source.node.subscribeMap target.node f
-
-/-- Subscribe with a pure map into a downstream event, scoped for cleanup. -/
-protected def subscribeMapScoped (source : Event t a) (target : Event t b) (scope : SubscriptionScope)
-    (f : a → b) : IO (IO Unit) := do
-  let unsub ← source.node.subscribeMap target.node f
-  scope.register unsub
-  pure unsub
-
 /-- Fire an event (internal use - normally done via trigger) -/
 protected def fire (e : Event t a) (value : a) : IO Unit :=
   e.node.fire value
@@ -273,7 +272,12 @@ private def deriveWith [Timeline t] (ctx : TimelineCtx t) (source : Event t a)
 def mapWithId [Timeline t] (f : a → b) (source : Event t a) (derivedNodeId : NodeId) : IO (Event t b) :=
   do
     let derived ← Event.newNodeWithId derivedNodeId (source.height.inc)
-    let _ ← Event.subscribeMap source derived f
+    let sourceConnect ← source.node.mapConnect.get
+    let composed : (Subscriber b → IO (IO Unit)) :=
+      match sourceConnect with
+      | some connect => fun cb => connect (fun a => cb (f a))
+      | none => fun cb => source.node.subscribe fun a => cb (f a)
+    derived.node.mapConnect.set (some composed)
     pure derived
 
 /-- Map a function over event values.
@@ -286,7 +290,9 @@ def mapWithId [Timeline t] (f : a → b) (source : Event t a) (derivedNodeId : N
     -- When numberEvent fires 5, doubled fires 10
     ``` -/
 def map [Timeline t] (ctx : TimelineCtx t) (f : a → b) (source : Event t a) : IO (Event t b) :=
-  deriveWith ctx source fun a fire => fire (f a)
+  do
+    let nodeId ← ctx.freshNodeId
+    mapWithId f source nodeId
 
 /-- Filter event occurrences by a predicate (with explicit NodeId).
     Only values that satisfy the predicate pass through. -/
