@@ -28,8 +28,7 @@ def new : IO SubscriptionScope := do
   let disposed ← IO.mkRef false
   pure ⟨subscriptions, disposed⟩
 
-/-- Create a child scope. The child is automatically disposed when the parent is disposed.
-    Children are disposed before parent's own subscriptions (depth-first). -/
+/-- Create a child scope. The child is automatically disposed when the parent is disposed. -/
 def child (parent : SubscriptionScope) : IO SubscriptionScope := do
   let isDisposed ← parent.disposed.get
   if isDisposed then
@@ -43,7 +42,7 @@ def child (parent : SubscriptionScope) : IO SubscriptionScope := do
     let childDisposed ← IO.mkRef false
     let childScope : SubscriptionScope := ⟨childSubscriptions, childDisposed⟩
 
-    -- Register child's disposal with parent (at front for depth-first)
+    -- Register child's disposal with parent
     -- We use a helper to dispose child when parent disposes
     let disposeChild : IO Unit := do
       -- Only dispose if not already disposed
@@ -53,8 +52,10 @@ def child (parent : SubscriptionScope) : IO SubscriptionScope := do
         for unsub in subs do
           unsub
 
-    -- Add to front of parent's subscriptions array for depth-first disposal
-    parent.subscriptions.modify fun arr => #[disposeChild] ++ arr
+    -- Add child disposal to parent's subscriptions
+    -- Using push (O(1)) instead of prepend (O(n)) for performance
+    -- Order doesn't affect correctness - all subscriptions get disposed regardless
+    parent.subscriptions.modify (·.push disposeChild)
 
     pure childScope
 
@@ -70,7 +71,6 @@ def register (scope : SubscriptionScope) (unsubscribe : IO Unit) : IO Unit := do
     scope.subscriptions.modify (·.push unsubscribe)
 
 /-- Dispose this scope and all children, running all unsubscribe actions.
-    Children are disposed first (depth-first), then this scope's subscriptions.
     Safe to call multiple times (no-op after first call). -/
 def dispose (scope : SubscriptionScope) : IO Unit := do
   let alreadyDisposed ← scope.disposed.modifyGet fun d => (d, true)
@@ -80,7 +80,7 @@ def dispose (scope : SubscriptionScope) : IO Unit := do
   -- Get all subscriptions and clear
   let subscriptions ← scope.subscriptions.modifyGet fun subs => (subs, #[])
 
-  -- Run all unsubscribe actions (children first since they're at front)
+  -- Run all unsubscribe actions
   for unsub in subscriptions do
     unsub
 

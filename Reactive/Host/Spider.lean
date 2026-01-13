@@ -765,18 +765,19 @@ def mergeListM (events : List (Event Spider a)) : SpiderM (Event Spider (List a)
   let nodeId ← env.timelineCtx.freshNodeId
   let maxHeight := events.foldl (fun h e => max h e.height) ⟨0⟩
   let derived ← Event.newNodeWithId nodeId (maxHeight.inc)
-  let bufferRef ← IO.mkRef ([] : List a)
+  -- Use Array for O(1) push instead of List O(n) append
+  let bufferRef ← IO.mkRef (#[] : Array a)
   let flushScheduledRef ← IO.mkRef false
 
   for e in events do
     let unsub ← Reactive.Event.subscribe e fun a => do
-      bufferRef.modify (· ++ [a])
+      bufferRef.modify (·.push a)
       let alreadyScheduled ← flushScheduledRef.get
       if !alreadyScheduled then
         flushScheduledRef.set true
         let flushAction : IO Unit := do
           flushScheduledRef.set false
-          let values ← bufferRef.modifyGet fun vs => (vs, [])
+          let values ← bufferRef.modifyGet fun vs => (vs.toList, #[])
           if !values.isEmpty then derived.fire values
         match ← getPropagationContext with
         | some queue =>

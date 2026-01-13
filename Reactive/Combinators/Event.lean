@@ -79,14 +79,15 @@ def mergeListWithId [Timeline t] (events : List (Event t a)) (nodeId : NodeId) :
   let derived ← Event.newNodeWithId nodeId (maxHeight.inc)
 
   -- Buffer for collecting simultaneous occurrences within a frame
-  let bufferRef ← IO.mkRef ([] : List a)
+  -- Use Array for O(1) push instead of List O(n) append
+  let bufferRef ← IO.mkRef (#[] : Array a)
   -- Track whether a flush is already scheduled for this frame
   let flushScheduledRef ← IO.mkRef false
 
   for e in events do
     let _ ← Reactive.Event.subscribe e fun a => do
-      -- Add value to buffer
-      bufferRef.modify (· ++ [a])
+      -- Add value to buffer (O(1) amortized)
+      bufferRef.modify (·.push a)
 
       -- Schedule flush at derived height if not already scheduled
       let alreadyScheduled ← flushScheduledRef.get
@@ -96,7 +97,7 @@ def mergeListWithId [Timeline t] (events : List (Event t a)) (nodeId : NodeId) :
         -- Define the flush action
         let flushAction : IO Unit := do
           flushScheduledRef.set false
-          let values ← bufferRef.modifyGet fun vs => (vs, [])
+          let values ← bufferRef.modifyGet fun vs => (vs.toList, #[])
           if !values.isEmpty then
             derived.fire values
 

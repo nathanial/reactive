@@ -178,8 +178,10 @@ test "manual scope disposal clears subscriptions" := do
   let result ← runSpider do
     let (_, childScope) ← SpiderM.withScope do
       let (event, _) ← newTriggerEvent (t := Spider) (a := Nat)
-      let _ ← Event.mapM (· + 1) event
+      -- Note: mapM uses map fusion (lazy subscription), so doesn't register eagerly
+      -- Use filterM which registers subscriptions immediately
       let _ ← Event.filterM (· > 0) event
+      let _ ← Event.filterM (· < 100) event
       pure ()
 
     let countBefore ← SpiderM.liftIO <| childScope.subscriptionCount
@@ -245,13 +247,15 @@ test "Scope subscription count increases" := do
     let countBefore ← SpiderM.liftIO <| scope.subscriptionCount
 
     let (event, _) ← newTriggerEvent (t := Spider) (a := Nat)
-    let _ ← Event.mapM (· + 1) event
-    let _ ← Event.mapM (· + 2) event
+    -- Note: mapM uses map fusion (lazy subscription), doesn't register eagerly
+    -- Use filterM which registers subscriptions immediately
+    let _ ← Event.filterM (· > 0) event
+    let _ ← Event.filterM (· < 100) event
 
     let countAfter ← SpiderM.liftIO <| scope.subscriptionCount
     pure (countBefore, countAfter)
 
-  -- Before: 0, After: 2 (one for each mapM)
+  -- Before: 0, After: 2 (one for each filterM)
   shouldBe result (0, 2)
 
 #generate_tests
