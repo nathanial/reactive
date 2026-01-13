@@ -80,9 +80,9 @@ Order doesn't matter for cleanup - all subscriptions get disposed regardless of 
 
 ### 3. Unsubscribe Filters Entire Array
 
-**Status**: Not started
+**Status**: DONE (January 2025)
 
-**Location**: `Core/Event.lean:131-132`
+**Location**: `Core/Event.lean:131-152`
 
 **Problem**:
 ```lean
@@ -91,21 +91,29 @@ node.subscribers.modify fun subs => subs.filter (·.1 != subId)
 
 Every unsubscribe scans and copies the entire subscriber array O(n).
 
-**Solution**: Lazy deletion with periodic compaction:
+**Solution**: Lazy deletion with O(1) unsubscribe:
 ```lean
--- Mark as deleted (O(1))
+-- Store callback index at subscribe time
+let idx := (← node.subscribers.get).size
+node.subscribers.modify (·.push (subId, some callback))
+
+-- Unsubscribe: set to none at known index (O(1))
 node.subscribers.modify fun subs =>
-  subs.map fun (id, cb) => if id == subId then (id, none) else (id, some cb)
+  subs.set idx (subId, none)
 
 -- Skip deleted during fire
 for (_, callback?) in subs do
   if let some callback := callback? then
     callback value
 
--- Compact periodically when deleted count exceeds threshold
+-- Track activeCount for maybeDisconnect (O(1) check)
+-- Compact automatically when disconnecting
 ```
 
-**Expected improvement**: 2-3x for dynamic graphs with frequent subscribe/unsubscribe.
+**Actual improvement**:
+- Unsubscribe: O(n) → O(1)
+- 1000 subscribe/fire/unsubscribe cycles: 354μs (0.35μs per cycle)
+- 500 subs + 250 unsubs + 100 fires: 1ms
 
 ---
 
@@ -219,7 +227,7 @@ This is the most complex optimization but could provide order-of-magnitude impro
 |--------|------|--------|--------|
 | Array buffer in mergeList | `Spider.lean`, `Event.lean` | 1 hour | **1.6-1.8x** for merges (DONE) |
 | Append instead of prepend | `Scope.lean` | 30 min | O(n)→O(1) for scope creation (DONE) |
-| Lazy unsubscribe | `Event.lean` | 2-3 hours | 2-3x for dynamic graphs |
+| Lazy unsubscribe | `Event.lean` | 2-3 hours | O(n)→O(1) unsubscribe (DONE) |
 
 ### Phase 2: Medium-Term (Weeks)
 
@@ -254,7 +262,7 @@ Track improvements in this table:
 | Baseline | 18ms | 32ms | - | 2025-01-12 |
 | mergeList Array buffer | 11ms | 18ms | **1.6-1.8x** | 2025-01-12 |
 | Scope append | 11ms | 18ms | N/A (different workload) | 2025-01-12 |
-| Lazy unsubscribe | TBD | TBD | TBD | TBD |
+| Lazy unsubscribe | 11ms | 18ms | O(n)→O(1) unsub | 2025-01-12 |
 
 ---
 

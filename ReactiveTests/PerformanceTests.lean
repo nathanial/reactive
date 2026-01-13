@@ -500,6 +500,61 @@ test "perf: switchDynamic with frequent outer and inner changes" := do
   shouldBe result.1 300
   IO.println s!"  [20 inner dynamics, 200 mixed switch/update ops: {result.2}]"
 
+/-! ## Subscribe/Unsubscribe Churn Tests -/
+
+test "perf: rapid subscribe/unsubscribe cycles (1000 cycles)" := do
+  let result ← runSpider do
+    let (event, trigger) ← newTriggerEvent (t := Spider) (a := Nat)
+    let countRef ← SpiderM.liftIO <| IO.mkRef (0 : Nat)
+
+    let start ← SpiderM.liftIO Chronos.MonotonicTime.now
+
+    -- 1000 cycles of: subscribe, fire, unsubscribe
+    for i in [:1000] do
+      let unsub ← SpiderM.liftIO <| event.subscribe fun _ =>
+        countRef.modify (· + 1)
+      SpiderM.liftIO <| trigger i
+      SpiderM.liftIO unsub
+
+    let elapsed ← SpiderM.liftIO start.elapsed
+    let count ← SpiderM.liftIO countRef.get
+    pure (count, elapsed)
+
+  -- Each cycle: subscribe, fire (count++), unsubscribe = 1000 fires
+  shouldBe result.1 1000
+  IO.println s!"  [1000 subscribe/fire/unsubscribe cycles: {result.2}]"
+
+test "perf: many subscribers with interleaved unsubscribe (500 subs, 250 unsubs)" := do
+  let result ← runSpider do
+    let (event, trigger) ← newTriggerEvent (t := Spider) (a := Nat)
+    let countRef ← SpiderM.liftIO <| IO.mkRef (0 : Nat)
+
+    -- Subscribe 500, keeping unsubscribe actions
+    let mut unsubs : Array (IO Unit) := #[]
+    for _ in [:500] do
+      let unsub ← SpiderM.liftIO <| event.subscribe fun _ =>
+        countRef.modify (· + 1)
+      unsubs := unsubs.push unsub
+
+    let start ← SpiderM.liftIO Chronos.MonotonicTime.now
+
+    -- Unsubscribe every other one (250 unsubscribes)
+    for i in [:250] do
+      match unsubs[i * 2]? with
+      | some unsub => SpiderM.liftIO unsub
+      | none => pure ()
+
+    -- Fire 100 times with remaining 250 subscribers
+    SpiderM.liftIO <| fireNTimes trigger 100
+
+    let elapsed ← SpiderM.liftIO start.elapsed
+    let count ← SpiderM.liftIO countRef.get
+    pure (count, elapsed)
+
+  -- 250 remaining subscribers * 100 fires = 25000
+  shouldBe result.1 25000
+  IO.println s!"  [500 subs, 250 unsubs, 100 fires: {result.2}]"
+
 #generate_tests
 
 end ReactiveTests.PerformanceTests

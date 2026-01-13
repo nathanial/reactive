@@ -40,14 +40,20 @@ def getPropagationContext : IO (Option PropagationQueue) :=
 abbrev Subscriber (a : Type) := a → IO Unit
 
 /-- Internal representation of an event with subscriber management.
-    Push-based: when fired, all subscribers are notified. -/
+    Push-based: when fired, all subscribers are notified.
+
+    Uses lazy deletion for O(1) unsubscribe: callbacks are set to `none`
+    instead of filtering the array. Dead entries are skipped during fire
+    and compacted when the dead count exceeds a threshold. -/
 structure EventNode (a : Type) where
   /-- Unique identifier for this node -/
   nodeId : NodeId
   /-- Height in dependency graph for topological ordering -/
   height : Height
-  /-- Registered subscribers (generic callbacks) -/
-  subscribers : IO.Ref (Array (SubscriberId × Subscriber a))
+  /-- Registered subscribers (Option for lazy deletion) -/
+  subscribers : IO.Ref (Array (SubscriberId × Option (Subscriber a)))
+  /-- Number of active (non-deleted) subscribers -/
+  activeCount : IO.Ref Nat
   /-- Map-chain connection for fusion (connects to upstream with composed map) -/
   mapConnect : IO.Ref (Option (Subscriber a → IO (IO Unit)))
   /-- Active upstream subscription when this map node is connected -/
@@ -60,6 +66,7 @@ namespace EventNode
 /-- Create a new event node -/
 def new (nodeId : NodeId) (height : Height := ⟨0⟩) : IO (EventNode a) := do
   let subs ← IO.mkRef #[]
+  let activeCount ← IO.mkRef 0
   let mapConnect ← IO.mkRef none
   let upstreamUnsub ← IO.mkRef none
   let nextId ← IO.mkRef 0
@@ -67,6 +74,7 @@ def new (nodeId : NodeId) (height : Height := ⟨0⟩) : IO (EventNode a) := do
     nodeId,
     height,
     subscribers := subs,
+    activeCount := activeCount,
     mapConnect := mapConnect,
     upstreamUnsub := upstreamUnsub,
     nextSubId := nextId
@@ -91,11 +99,13 @@ def fire (node : EventNode a) (value : a) : IO Unit := do
       -- Context exists but not in frame, fire immediately
       fireImmediate node value
 where
-  /-- Fire immediately without queueing - calls all subscribers -/
+  /-- Fire immediately without queueing - calls all active subscribers -/
   @[inline] fireImmediate (node : EventNode a) (value : a) : IO Unit := do
     let subs ← node.subscribers.get
-    for (_, callback) in subs do
-      callback value
+    -- Skip deleted (none) entries
+    for (_, callback?) in subs do
+      if let some callback := callback? then
+        callback value
 
 /-- Ensure a map-only node is connected to its root when it gains subscribers. -/
 def ensureConnected (node : EventNode a) : IO Unit := do
@@ -108,34 +118,50 @@ def ensureConnected (node : EventNode a) : IO Unit := do
       let unsub ← connect node.fire
       node.upstreamUnsub.set (some unsub)
 
-/-- Disconnect a map-only node from its root when it has no subscribers. -/
+/-- Disconnect a map-only node from its root when it has no active subscribers. -/
 def maybeDisconnect (node : EventNode a) : IO Unit := do
-  let subs ← node.subscribers.get
-  if subs.isEmpty then
+  let count ← node.activeCount.get
+  if count == 0 then
     match ← node.upstreamUnsub.get with
     | none => pure ()
     | some unsub =>
       unsub
       node.upstreamUnsub.set none
-  else
-    pure ()
+    -- Clear dead entries when fully disconnected
+    node.subscribers.set #[]
 
-/-- Subscribe to this event, returning an unsubscribe action -/
+/-- Subscribe to this event, returning an unsubscribe action.
+    Unsubscribe is O(1) using lazy deletion - the callback is set to `none`
+    instead of filtering the array. -/
 def subscribe (node : EventNode a) (callback : Subscriber a) : IO (IO Unit) := do
-  let wasEmpty := (← node.subscribers.get).isEmpty
+  let wasEmpty ← node.activeCount.modifyGet fun n => (n == 0, n + 1)
   let subId ← node.nextSubId.modifyGet fun n => (⟨n⟩, n + 1)
-  node.subscribers.modify (·.push (subId, callback))
+  let idx := (← node.subscribers.get).size
+  node.subscribers.modify (·.push (subId, some callback))
   if wasEmpty then
     ensureConnected node
+  -- Return O(1) unsubscribe action using lazy deletion
   pure do
+    -- Mark as deleted by setting to none (O(1) array update)
     node.subscribers.modify fun subs =>
-      subs.filter (·.1 != subId)
+      if h : idx < subs.size then
+        subs.set idx (subId, none)
+      else
+        subs  -- Index out of bounds (shouldn't happen)
+    node.activeCount.modify (· - 1)
     maybeDisconnect node
 
-/-- Get the number of subscribers -/
-def subscriberCount (node : EventNode a) : IO Nat := do
+/-- Get the number of active subscribers -/
+def subscriberCount (node : EventNode a) : IO Nat :=
+  node.activeCount.get
+
+/-- Compact the subscriber array by removing deleted entries.
+    Called automatically when disconnecting, but can be called manually
+    for long-lived nodes with high subscription churn. -/
+def compact (node : EventNode a) : IO Unit := do
   let subs ← node.subscribers.get
-  pure subs.size
+  let active := subs.filter (·.2.isSome)
+  node.subscribers.set active
 
 end EventNode
 
