@@ -102,11 +102,10 @@ def mergeListWithId [Timeline t] (events : List (Event t a)) (nodeId : NodeId) :
 
         -- Schedule at derived height so it runs after all source events
         match ← getPropagationContext with
-        | some queueRef =>
-          let q ← queueRef.get
-          if q.inFrame then
+        | some queue =>
+          if ← queue.isInFrame then
             let pending : PendingFire := ⟨derived.height, nodeId, flushAction⟩
-            queueRef.set (q.insert pending)
+            queue.insert pending
           else
             -- Not in frame, flush immediately
             flushAction
@@ -170,12 +169,11 @@ def delayFrameWithId [Timeline t] (e : Event t a) (nodeId : NodeId) : IO (Event 
   let derived ← Event.newNodeWithId nodeId (e.height.inc)
   let _ ← Reactive.Event.subscribe e fun a => do
     match ← getPropagationContext with
-    | some queueRef =>
-      let q ← queueRef.get
+    | some queue =>
       let action := derived.fire a
       let pending : PendingFire := ⟨derived.height, nodeId, action⟩
-      -- Add to nextFramePending instead of current frame
-      queueRef.set { q with nextFramePending := q.nextFramePending.push pending }
+      -- Add to next frame instead of current frame
+      queue.insertNextFrame pending
     | none =>
       -- No frame context, fire immediately (fallback)
       derived.fire a

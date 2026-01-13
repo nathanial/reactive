@@ -48,7 +48,7 @@ structure SpiderEnv where
   /-- Trigger for the post-build event -/
   postBuildTrigger : Unit → IO Unit
   /-- Propagation queue for frame-based event handling -/
-  propagationQueue : IO.Ref PropagationQueue
+  propagationQueue : PropagationQueue
   /-- Current subscription scope for automatic cleanup -/
   currentScope : SubscriptionScope
   /-- Error handler for subscriber callback exceptions -/
@@ -65,7 +65,7 @@ def new (errorHandler : PropagationErrorHandler := defaultErrorHandler) : IO Spi
   let timelineCtx ← TimelineCtx.new
   let postBuildActions ← IO.mkRef #[]
   let (postBuildEvent, postBuildTrigger) ← Event.newTriggerWithId ⟨0⟩
-  let propagationQueue ← IO.mkRef {}
+  let propagationQueue ← PropagationQueue.new
   let currentScope ← SubscriptionScope.new
   let errorHandlerRef ← IO.mkRef errorHandler
   let constructionDepth ← IO.mkRef 0
@@ -95,27 +95,20 @@ partial def drainQueue (env : SpiderEnv) : IO Unit := do
   loop errorHandler 0
 where
   loop (errorHandler : PropagationErrorHandler) (count : Nat) : IO Unit := do
-    let q ← env.propagationQueue.get
-    match q.popMin? with
+    let pendingOpt ← env.propagationQueue.popMin?
+    match pendingOpt with
     | none =>
       -- Current frame empty, check for next-frame events (from delayFrame)
-      if q.nextFramePending.isEmpty then
-        return ()  -- All done
-      else
-        -- Start new sub-frame with next-frame events
-        env.propagationQueue.set {
-          pending := q.nextFramePending,
-          nextFramePending := #[],
-          inFrame := true
-        }
+      let started ← env.propagationQueue.startNextFrame
+      if started then
         loop errorHandler count
-    | some (pending, q') =>
+      else
+        return ()  -- All done
+    | some pending =>
       -- Check total events processed for infinite loop detection
       let count' := count + 1
       if count' > maxPropagationDepth then
         throw <| IO.userError s!"[Reactive] Infinite loop detected during event propagation ({count'} events processed, exceeded {maxPropagationDepth}). This usually means an event subscriber is triggering events recursively."
-
-      env.propagationQueue.set q'
       -- Execute the fire action with error handling
       try
         pending.fire
@@ -129,17 +122,17 @@ where
     If already in a frame, just runs the action (it will enqueue).
     If not in a frame, starts a new frame, runs action, then drains queue. -/
 def withFrame (env : SpiderEnv) (action : IO Unit) : IO Unit := do
-  let q ← env.propagationQueue.get
-  if q.inFrame then
+  let inFrame ← env.propagationQueue.isInFrame
+  if inFrame then
     -- Already in a frame, just run (fires will enqueue)
     action
   else
     -- Start new frame, reset propagation counter for infinite loop detection
     env.propagationDepth.set 0
-    env.propagationQueue.set { q with inFrame := true }
+    env.propagationQueue.setInFrame true
     action
     env.drainQueue
-    env.propagationQueue.modify fun q => { q with inFrame := false }
+    env.propagationQueue.setInFrame false
 
 end SpiderEnv
 
@@ -669,8 +662,7 @@ def mapM (f : a → b) (e : Event Spider a) : SpiderM (Event Spider b) := ⟨fun
   let _ ← env.incrementDepth "Event.mapM"
   let nodeId ← env.timelineCtx.freshNodeId
   let derived ← Event.newNodeWithId nodeId (e.height.inc)
-  let unsub ← Reactive.Event.subscribe e fun a => derived.fire (f a)
-  env.currentScope.register unsub
+  let _ ← Reactive.Event.subscribeMapScoped e derived env.currentScope f
   env.decrementDepth
   pure derived⟩
 
@@ -788,11 +780,10 @@ def mergeListM (events : List (Event Spider a)) : SpiderM (Event Spider (List a)
           let values ← bufferRef.modifyGet fun vs => (vs, [])
           if !values.isEmpty then derived.fire values
         match ← getPropagationContext with
-        | some queueRef =>
-          let q ← queueRef.get
-          if q.inFrame then
+        | some queue =>
+          if ← queue.isInFrame then
             let pending : PendingFire := ⟨derived.height, nodeId, flushAction⟩
-            queueRef.set (q.insert pending)
+            queue.insert pending
           else flushAction
         | none => flushAction
     env.currentScope.register unsub
@@ -834,11 +825,10 @@ def delayFrameM (e : Event Spider a) : SpiderM (Event Spider a) := ⟨fun env =>
   let derived ← Event.newNodeWithId nodeId (e.height.inc)
   let unsub ← Reactive.Event.subscribe e fun a => do
     match ← getPropagationContext with
-    | some queueRef =>
-      let q ← queueRef.get
+    | some queue =>
       let action := derived.fire a
       let pending : PendingFire := ⟨derived.height, nodeId, action⟩
-      queueRef.set { q with nextFramePending := q.nextFramePending.push pending }
+      queue.insertNextFrame pending
     | none => derived.fire a
   env.currentScope.register unsub
   pure derived⟩

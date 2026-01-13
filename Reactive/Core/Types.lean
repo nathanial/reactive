@@ -111,12 +111,11 @@ instance : LE PendingFire where
     Uses a binary min-heap for efficient priority queue operations. -/
 structure PropagationQueue where
   /-- Binary min-heap of pending fires, ordered by (height, nodeId) -/
-  pending : Array PendingFire := #[]
+  pending : IO.Ref (Array PendingFire)
   /-- Pending fires for the next frame (used by delayFrame) -/
-  nextFramePending : Array PendingFire := #[]
+  nextFramePending : IO.Ref (Array PendingFire)
   /-- Whether we're currently inside a propagation frame -/
-  inFrame : Bool := false
-  deriving Inhabited
+  inFrame : IO.Ref Bool
 
 namespace PropagationQueue
 
@@ -176,31 +175,72 @@ partial def siftDown (arr : Array PendingFire) (i : Nat) : Array PendingFire :=
   else
     arr
 
-/-- Insert a pending fire into the heap. O(log n) -/
-def insert (q : PropagationQueue) (p : PendingFire) : PropagationQueue :=
-  let arr := q.pending.push p
-  let arr := siftUp arr (arr.size - 1)
-  { q with pending := arr }
+/-- Insert a pending fire into a heap array. O(log n) -/
+@[inline] private def heapInsert (arr : Array PendingFire) (p : PendingFire) : Array PendingFire :=
+  let arr := arr.push p
+  siftUp arr (arr.size - 1)
 
-/-- Pop the minimum (lowest height) pending fire. O(log n) -/
-def popMin? (q : PropagationQueue) : Option (PendingFire × PropagationQueue) :=
-  if q.pending.size == 0 then
+/-- Pop the minimum (lowest height) pending fire from a heap array. O(log n) -/
+@[inline] private def heapPopMin? (arr : Array PendingFire) : Option (PendingFire × Array PendingFire) :=
+  if arr.size == 0 then
     none
   else
-    let minElem := q.pending[0]!
-    if q.pending.size == 1 then
-      -- Only one element, just remove it
-      some (minElem, { q with pending := #[] })
+    let minElem := arr[0]!
+    if arr.size == 1 then
+      some (minElem, #[])
     else
-      -- Move last element to root and sift down
-      let last := q.pending.back!
-      let arr := q.pending.pop  -- Remove last
-      let arr := arr.set! 0 last  -- Put it at root
-      let arr := siftDown arr 0  -- Restore heap property
-      some (minElem, { q with pending := arr })
+      let last := arr.back!
+      let arr := arr.pop
+      let arr := arr.set! 0 last
+      let arr := siftDown arr 0
+      some (minElem, arr)
 
-/-- Check if the queue is empty -/
-def isEmpty (q : PropagationQueue) : Bool := q.pending.isEmpty
+/-- Create a new empty propagation queue. -/
+def new : IO PropagationQueue := do
+  let pending ← IO.mkRef #[]
+  let nextFramePending ← IO.mkRef #[]
+  let inFrame ← IO.mkRef false
+  pure { pending, nextFramePending, inFrame }
+
+/-- Check if the queue is currently inside a frame. -/
+@[inline] def isInFrame (q : PropagationQueue) : IO Bool :=
+  q.inFrame.get
+
+/-- Set the in-frame flag. -/
+@[inline] def setInFrame (q : PropagationQueue) (value : Bool) : IO Unit :=
+  q.inFrame.set value
+
+/-- Insert a pending fire into the current frame heap. -/
+@[inline] def insert (q : PropagationQueue) (p : PendingFire) : IO Unit := do
+  q.pending.modify fun arr => heapInsert arr p
+
+/-- Insert a pending fire into the next-frame heap. -/
+@[inline] def insertNextFrame (q : PropagationQueue) (p : PendingFire) : IO Unit := do
+  q.nextFramePending.modify fun arr => heapInsert arr p
+
+/-- Pop the minimum (lowest height) pending fire from the current frame. -/
+def popMin? (q : PropagationQueue) : IO (Option PendingFire) := do
+  let result ← q.pending.modifyGet fun arr =>
+    match heapPopMin? arr with
+    | none => (none, arr)
+    | some (minElem, arr') => (some minElem, arr')
+  pure result
+
+/-- Check if the current frame heap is empty. -/
+@[inline] def isEmpty (q : PropagationQueue) : IO Bool := do
+  let arr ← q.pending.get
+  pure arr.isEmpty
+
+/-- Move next-frame pending fires into the current frame.
+    Returns true if a new frame was started. -/
+def startNextFrame (q : PropagationQueue) : IO Bool := do
+  let next ← q.nextFramePending.get
+  if next.isEmpty then
+    pure false
+  else
+    q.pending.set next
+    q.nextFramePending.set #[]
+    pure true
 
 end PropagationQueue
 
