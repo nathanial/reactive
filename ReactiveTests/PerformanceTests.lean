@@ -220,22 +220,22 @@ test "perf: 200-branch diamond pattern, 50 fires" := do
 
 /-! ## Mixed Wide + Deep Tests -/
 
-test "perf: mixed wide and deep network (50 chains x 100 depth x 20 subscribers)" := do
+test "perf: mixed wide and deep network (500 chains x 1000 depth x 200 subscribers)" := do
   let result ← runSpider do
     let (source, trigger) ← newTriggerEvent (t := Spider) (a := Nat)
 
-    -- Create 50 deep chains, each 100 levels deep
+    -- Create 500 deep chains, each 1000 levels deep
     let mut endpoints : Array (Event Spider Nat) := #[]
-    for i in [:50] do
-      let chain ← buildDeepChain source 100
+    for i in [:500] do
+      let chain ← buildDeepChain source 1000
       -- Add a unique offset per chain so we can verify independence
       let tagged ← Event.mapM (· + i * 1000) chain
       endpoints := endpoints.push tagged
 
-    -- Add 20 subscribers to each of the 50 endpoints
+    -- Add 200 subscribers to each of the 500 endpoints
     let countRef ← SpiderM.liftIO <| IO.mkRef (0 : Nat)
     for endpoint in endpoints do
-      for _ in [:20] do
+      for _ in [:200] do
         let _ ← SpiderM.liftIO <| endpoint.subscribe fun _ =>
           countRef.modify (· + 1)
 
@@ -246,9 +246,9 @@ test "perf: mixed wide and deep network (50 chains x 100 depth x 20 subscribers)
     let count ← SpiderM.liftIO countRef.get
     pure (count, elapsed)
 
-  -- 50 endpoints * 20 subscribers * 100 fires = 100,000
-  shouldBe result.1 100000
-  IO.println s!"  [50 chains x 100 depth x 20 subs x 100 fires: {result.2}]"
+  -- 500 endpoints * 200 subscribers * 100 fires = 10,000,000
+  shouldBe result.1 10000000
+  IO.println s!"  [500 chains x 1000 depth x 200 subs x 100 fires: {result.2}]"
 
 /-! ## Switch Combinator Under Load -/
 
