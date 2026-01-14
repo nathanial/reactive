@@ -93,6 +93,20 @@ def subscriptionCount (scope : SubscriptionScope) : IO Nat := do
   let subs ← scope.subscriptions.get
   pure subs.size
 
+/-- Clear all subscriptions from this scope, running their cleanup actions,
+    but keep the scope alive for reuse. Unlike dispose, this allows the scope
+    to be reused for new subscriptions without creating a new child scope
+    (which would leak entries in the parent's subscriptions array). -/
+def clear (scope : SubscriptionScope) : IO Unit := do
+  let isDisposed ← scope.disposed.get
+  if isDisposed then
+    return ()
+  -- Get all subscriptions and clear
+  let subscriptions ← scope.subscriptions.modifyGet fun subs => (subs, #[])
+  -- Run all unsubscribe actions
+  for unsub in subscriptions do
+    unsub
+
 end SubscriptionScope
 
 end Reactive
