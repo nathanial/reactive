@@ -19,6 +19,21 @@ structure Spider where
 
 instance : Timeline Spider where
 
+/-! ## Type Abbreviations
+
+Short aliases for Spider-parameterized FRP types.
+After `open Reactive.Host`, use `Dyn a`, `Evt a`, `Beh a` instead of
+`Dynamic Spider a`, `Event Spider a`, `Behavior Spider a`. -/
+
+/-- Short alias for `Dynamic Spider a` -/
+abbrev Dyn := Dynamic Spider
+
+/-- Short alias for `Event Spider a` -/
+abbrev Evt := Event Spider
+
+/-- Short alias for `Behavior Spider a` -/
+abbrev Beh := Behavior Spider
+
 /-- Error handler for subscriber callback exceptions.
     Receives the error that occurred during event propagation.
     Return `true` to continue processing remaining subscribers,
