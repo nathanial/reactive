@@ -555,6 +555,362 @@ test "perf: many subscribers with interleaved unsubscribe (500 subs, 250 unsubs)
   shouldBe result.1 25000
   IO.println s!"  [500 subs, 250 unsubs, 100 fires: {result.2}]"
 
+/-! ## Dynamic.mapM Fan-Out Tests (WidgetPerf Pattern) -/
+
+test "perf: 1000 Dynamic.mapM from single source, 60 updates (simulating 60fps)" := do
+  let result ← runSpider do
+    -- Create source dynamic (like shared elapsedTime)
+    let (sourceEvent, fireSource) ← newTriggerEvent (t := Spider) (a := Float)
+    let sourceDyn ← holdDyn 0.0 sourceEvent
+
+    -- Create 1000 derived dynamics via mapM (like progress bar animationProgress)
+    let mut derivedDyns : Array (Dynamic Spider Float) := #[]
+    for _ in [:1000] do
+      let cycleDuration := 2.0
+      let derived ← Dynamic.mapM (fun t =>
+        let cycleTime := t - (t / cycleDuration).floor * cycleDuration
+        cycleTime / cycleDuration
+      ) sourceDyn
+      derivedDyns := derivedDyns.push derived
+
+    -- Subscribe to all derived dynamics' updated events (like dynWidget does)
+    let updateCountRef ← SpiderM.liftIO <| IO.mkRef (0 : Nat)
+    for dyn in derivedDyns do
+      let _ ← SpiderM.liftIO <| dyn.updated.subscribe fun _ =>
+        updateCountRef.modify (· + 1)
+
+    -- Simulate 60 frames of animation
+    let start ← SpiderM.liftIO Chronos.MonotonicTime.now
+    for frame in [:60] do
+      let t := frame.toFloat * (1.0 / 60.0)  -- 60fps timing
+      SpiderM.liftIO <| fireSource t
+    let elapsed ← SpiderM.liftIO start.elapsed
+
+    let updateCount ← SpiderM.liftIO updateCountRef.get
+    pure (updateCount, elapsed)
+
+  -- 1000 derived dynamics * 60 fires = 60,000 updates
+  -- (first fire is to value 0.0 which may not trigger updates if initial was 0.0)
+  shouldBe result.1 59000
+  IO.println s!"  [1000 Dynamic.mapM x 60 fires: {result.2}]"
+
+test "perf: 1000 Dynamic.mapM creation time" := do
+  let result ← runSpider do
+    let (sourceEvent, _) ← newTriggerEvent (t := Spider) (a := Float)
+    let sourceDyn ← holdDyn 0.0 sourceEvent
+
+    let start ← SpiderM.liftIO Chronos.MonotonicTime.now
+
+    let mut derivedDyns : Array (Dynamic Spider Float) := #[]
+    for i in [:1000] do
+      let derived ← Dynamic.mapM (fun t => t + i.toFloat) sourceDyn
+      derivedDyns := derivedDyns.push derived
+
+    let elapsed ← SpiderM.liftIO start.elapsed
+    pure (derivedDyns.size, elapsed)
+
+  shouldBe result.1 1000
+  IO.println s!"  [1000 Dynamic.mapM creation: {result.2}]"
+
+/-! ## Granular Overhead Tests (Isolating Bottlenecks) -/
+
+test "perf: baseline - 1000 subscribers, minimal callback (just increment)" := do
+  let result ← runSpider do
+    let (event, trigger) ← newTriggerEvent (t := Spider) (a := Float)
+    let countRef ← SpiderM.liftIO <| IO.mkRef (0 : Nat)
+
+    -- Add 1000 subscribers with minimal work
+    for _ in [:1000] do
+      let _ ← SpiderM.liftIO <| event.subscribe fun _ =>
+        countRef.modify (· + 1)
+
+    -- Time 60 fires
+    let start ← SpiderM.liftIO Chronos.MonotonicTime.now
+    for frame in [:60] do
+      SpiderM.liftIO <| trigger (frame.toFloat / 60.0)
+    let elapsed ← SpiderM.liftIO start.elapsed
+
+    let count ← SpiderM.liftIO countRef.get
+    pure (count, elapsed)
+
+  shouldBe result.1 60000
+  IO.println s!"  [baseline: 1000 subs x 60 fires, minimal callback: {result.2}]"
+
+test "perf: with IO.Ref get/set - 1000 subscribers with value storage" := do
+  let result ← runSpider do
+    let (event, trigger) ← newTriggerEvent (t := Spider) (a := Float)
+
+    -- Create 1000 refs and subscribers that read/write
+    let countRef ← SpiderM.liftIO <| IO.mkRef (0 : Nat)
+    for _ in [:1000] do
+      let ref ← SpiderM.liftIO <| IO.mkRef 0.0
+      let _ ← SpiderM.liftIO <| event.subscribe fun v => do
+        let old ← ref.get
+        ref.set (old + v)
+        countRef.modify (· + 1)
+
+    let start ← SpiderM.liftIO Chronos.MonotonicTime.now
+    for frame in [:60] do
+      SpiderM.liftIO <| trigger (frame.toFloat / 60.0)
+    let elapsed ← SpiderM.liftIO start.elapsed
+
+    let count ← SpiderM.liftIO countRef.get
+    pure (count, elapsed)
+
+  shouldBe result.1 60000
+  IO.println s!"  [with IO.Ref: 1000 subs x 60 fires, get/set each: {result.2}]"
+
+test "perf: with downstream trigger - 1000 subscribers each firing derived event" := do
+  let result ← runSpider do
+    let (sourceEvent, trigger) ← newTriggerEvent (t := Spider) (a := Float)
+
+    -- Create 1000 derived events
+    let countRef ← SpiderM.liftIO <| IO.mkRef (0 : Nat)
+    for _ in [:1000] do
+      let (derivedEvent, fireDerived) ← newTriggerEvent (t := Spider) (a := Float)
+      -- Subscribe to source, fire derived
+      let _ ← SpiderM.liftIO <| sourceEvent.subscribe fun v =>
+        fireDerived v
+      -- Subscribe to derived to count
+      let _ ← SpiderM.liftIO <| derivedEvent.subscribe fun _ =>
+        countRef.modify (· + 1)
+
+    let start ← SpiderM.liftIO Chronos.MonotonicTime.now
+    for frame in [:60] do
+      SpiderM.liftIO <| trigger (frame.toFloat / 60.0)
+    let elapsed ← SpiderM.liftIO start.elapsed
+
+    let count ← SpiderM.liftIO countRef.get
+    pure (count, elapsed)
+
+  shouldBe result.1 60000
+  IO.println s!"  [with trigger: 1000 subs x 60 fires, each fires derived: {result.2}]"
+
+test "perf: full Dynamic.mapM pattern breakdown" := do
+  let result ← runSpider do
+    let (sourceEvent, fireSource) ← newTriggerEvent (t := Spider) (a := Float)
+    let sourceDyn ← holdDyn 0.0 sourceEvent
+
+    -- This test manually replicates what 1000 Dynamic.mapM calls do
+    let countRef ← SpiderM.liftIO <| IO.mkRef (0 : Nat)
+
+    for _ in [:1000] do
+      let ref ← SpiderM.liftIO <| IO.mkRef 0.0
+      let (derivedEvent, fireDerived) ← newTriggerEvent (t := Spider) (a := Float)
+
+      -- Subscribe to source (what Dynamic.mapM does internally)
+      let _ ← SpiderM.liftIO <| sourceDyn.updated.subscribe fun v => do
+        let newVal := v * 0.5  -- map function
+        ref.set newVal
+        fireDerived newVal
+
+      -- Subscribe to derived event's updated (like dynWidget does)
+      let _ ← SpiderM.liftIO <| derivedEvent.subscribe fun _ =>
+        countRef.modify (· + 1)
+
+    let start ← SpiderM.liftIO Chronos.MonotonicTime.now
+    for frame in [:60] do
+      SpiderM.liftIO <| fireSource (frame.toFloat / 60.0)
+    let elapsed ← SpiderM.liftIO start.elapsed
+
+    let count ← SpiderM.liftIO countRef.get
+    pure (count, elapsed)
+
+  shouldBe result.1 60000
+  IO.println s!"  [full pattern: 1000 derived x 60 fires, all ops: {result.2}]"
+
+test "perf: single subscription fan-out approach (baseline comparison)" := do
+  -- This test shows what we COULD achieve with optimized fan-out:
+  -- Instead of 1000 separate subscriptions, use 1 subscription + internal loop
+  let result ← runSpider do
+    let (sourceEvent, fireSource) ← newTriggerEvent (t := Spider) (a := Float)
+    let sourceDyn ← holdDyn 0.0 sourceEvent
+
+    -- Instead of 1000 Dynamic.mapM calls, store 1000 callbacks in an array
+    -- and invoke them from a single subscription
+    let callbacks ← SpiderM.liftIO <| IO.mkRef (Array.mkEmpty 1000 : Array (Float → IO Unit))
+    let countRef ← SpiderM.liftIO <| IO.mkRef (0 : Nat)
+
+    -- Register 1000 "fake widget" callbacks
+    for _ in [:1000] do
+      let ref ← SpiderM.liftIO <| IO.mkRef 0.0
+      let cb : Float → IO Unit := fun v => do
+        ref.set (v * 0.5)  -- map function
+        countRef.modify (· + 1)  -- increment counter
+      SpiderM.liftIO <| callbacks.modify (·.push cb)
+
+    -- Single subscription that fans out to all callbacks
+    let cbs ← SpiderM.liftIO callbacks.get
+    let _ ← SpiderM.liftIO <| sourceDyn.updated.subscribe fun v => do
+      for cb in cbs do
+        cb v
+
+    let start ← SpiderM.liftIO Chronos.MonotonicTime.now
+    for frame in [:60] do
+      SpiderM.liftIO <| fireSource (frame.toFloat / 60.0)
+    let elapsed ← SpiderM.liftIO start.elapsed
+
+    let count ← SpiderM.liftIO countRef.get
+    pure (count, elapsed)
+
+  shouldBe result.1 60000
+  IO.println s!"  [single-subscription fan-out x 60 fires: {result.2}]"
+
+/-! ## FRP Layer Micro-Benchmarks (Isolating Overhead) -/
+
+test "micro: pure callback array iteration (no FRP)" := do
+  -- Baseline: just iterating an array of callbacks, no FRP at all
+  let callbacks ← IO.mkRef (Array.mkEmpty 1000 : Array (Float → IO Unit))
+  let countRef ← IO.mkRef (0 : Nat)
+
+  for _ in [:1000] do
+    let ref ← IO.mkRef 0.0
+    let cb : Float → IO Unit := fun v => do
+      ref.set v
+      countRef.modify (· + 1)
+    callbacks.modify (·.push cb)
+
+  let cbs ← callbacks.get
+  let start ← Chronos.MonotonicTime.now
+  for frame in [:60] do
+    let v := frame.toFloat / 60.0
+    for cb in cbs do
+      cb v
+  let elapsed ← start.elapsed
+
+  let count ← countRef.get
+  shouldBe count 60000
+  IO.println s!"  [pure callback iteration: {elapsed}]"
+
+test "micro: FRP Event.subscribe overhead (1000 subs to same event)" := do
+  -- Measure the overhead of the FRP subscription mechanism itself
+  let result ← runSpider do
+    let (event, fire) ← newTriggerEvent (t := Spider) (a := Float)
+    let countRef ← SpiderM.liftIO <| IO.mkRef (0 : Nat)
+
+    -- Subscribe 1000 callbacks to the SAME event
+    for _ in [:1000] do
+      let ref ← SpiderM.liftIO <| IO.mkRef 0.0
+      let _ ← SpiderM.liftIO <| event.subscribe fun v => do
+        ref.set v
+        countRef.modify (· + 1)
+
+    let start ← SpiderM.liftIO Chronos.MonotonicTime.now
+    for frame in [:60] do
+      SpiderM.liftIO <| fire (frame.toFloat / 60.0)
+    let elapsed ← SpiderM.liftIO start.elapsed
+
+    let count ← SpiderM.liftIO countRef.get
+    pure (count, elapsed)
+
+  shouldBe result.1 60000
+  IO.println s!"  [FRP 1000 subs to same event: {result.2}]"
+
+test "micro: FRP with Option checking overhead simulation" := do
+  -- Simulate the Array (SubscriberId × Option callback) iteration
+  let subs ← IO.mkRef (Array.mkEmpty 1000 : Array (Nat × Option (Float → IO Unit)))
+  let countRef ← IO.mkRef (0 : Nat)
+
+  for i in [:1000] do
+    let ref ← IO.mkRef 0.0
+    let cb : Float → IO Unit := fun v => do
+      ref.set v
+      countRef.modify (· + 1)
+    subs.modify (·.push (i, some cb))
+
+  let subsArr ← subs.get
+  let start ← Chronos.MonotonicTime.now
+  for frame in [:60] do
+    let v := frame.toFloat / 60.0
+    for (_, callback?) in subsArr do
+      if let some callback := callback? then
+        callback v
+  let elapsed ← start.elapsed
+
+  let count ← countRef.get
+  shouldBe count 60000
+  IO.println s!"  [Option checking simulation: {elapsed}]"
+
+test "micro: compact array vs tuple+Option array" := do
+  -- Compare compact Array (callback) vs Array (id × Option callback)
+  let compactCallbacks ← IO.mkRef (Array.mkEmpty 1000 : Array (Float → IO Unit))
+  let tupleCallbacks ← IO.mkRef (Array.mkEmpty 1000 : Array (Nat × Option (Float → IO Unit)))
+  let countRef1 ← IO.mkRef (0 : Nat)
+  let countRef2 ← IO.mkRef (0 : Nat)
+
+  for i in [:1000] do
+    let ref1 ← IO.mkRef 0.0
+    let cb1 : Float → IO Unit := fun v => do
+      ref1.set v
+      countRef1.modify (· + 1)
+    compactCallbacks.modify (·.push cb1)
+
+    let ref2 ← IO.mkRef 0.0
+    let cb2 : Float → IO Unit := fun v => do
+      ref2.set v
+      countRef2.modify (· + 1)
+    tupleCallbacks.modify (·.push (i, some cb2))
+
+  let compact ← compactCallbacks.get
+  let tuples ← tupleCallbacks.get
+
+  -- Time compact array
+  let start1 ← Chronos.MonotonicTime.now
+  for frame in [:60] do
+    let v := frame.toFloat / 60.0
+    for cb in compact do
+      cb v
+  let elapsed1 ← start1.elapsed
+
+  -- Time tuple+Option array
+  let start2 ← Chronos.MonotonicTime.now
+  for frame in [:60] do
+    let v := frame.toFloat / 60.0
+    for (_, callback?) in tuples do
+      if let some callback := callback? then
+        callback v
+  let elapsed2 ← start2.elapsed
+
+  IO.println s!"  [compact: {elapsed1}, tuple+Option: {elapsed2}]"
+
+test "micro: IO.Ref.modify vs direct callback" := do
+  -- Test if IO.Ref operations inside callbacks add significant overhead
+  let directCountRef ← IO.mkRef (0 : Nat)
+  let modifyCountRef ← IO.mkRef (0 : Nat)
+
+  -- Direct increment callbacks
+  let directCallbacks ← IO.mkRef #[]
+  for _ in [:1000] do
+    let cb : Unit → IO Unit := fun _ => directCountRef.modify (· + 1)
+    directCallbacks.modify (·.push cb)
+
+  -- Callbacks with extra IO.Ref operations
+  let modifyCallbacks ← IO.mkRef #[]
+  for _ in [:1000] do
+    let ref ← IO.mkRef 0.0
+    let cb : Unit → IO Unit := fun _ => do
+      let old ← ref.get
+      ref.set (old + 1.0)
+      modifyCountRef.modify (· + 1)
+    modifyCallbacks.modify (·.push cb)
+
+  let direct ← directCallbacks.get
+  let modify ← modifyCallbacks.get
+
+  let start1 ← Chronos.MonotonicTime.now
+  for _ in [:60] do
+    for cb in direct do
+      cb ()
+  let elapsed1 ← start1.elapsed
+
+  let start2 ← Chronos.MonotonicTime.now
+  for _ in [:60] do
+    for cb in modify do
+      cb ()
+  let elapsed2 ← start2.elapsed
+
+  IO.println s!"  [direct: {elapsed1}, with IO.Ref ops: {elapsed2}]"
+
 #generate_tests
 
 end ReactiveTests.PerformanceTests

@@ -93,6 +93,12 @@ def subscriptionCount (scope : SubscriptionScope) : IO Nat := do
   let subs ← scope.subscriptions.get
   pure subs.size
 
+/-- Check if the scope has no registered subscriptions.
+    More efficient than `subscriptionCount == 0` for auto-detection. -/
+def isEmpty (scope : SubscriptionScope) : IO Bool := do
+  let subs ← scope.subscriptions.get
+  pure subs.isEmpty
+
 /-- Clear all subscriptions from this scope, running their cleanup actions,
     but keep the scope alive for reuse. Unlike dispose, this allows the scope
     to be reused for new subscriptions without creating a new child scope
