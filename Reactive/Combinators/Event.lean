@@ -5,10 +5,17 @@
 -/
 import Reactive.Core
 import Reactive.Class
+import Std.Data.HashMap
 
 namespace Reactive
 
 namespace Event
+
+/-- Event selector returned by `fan`.
+    Provides per-key events for an Event carrying a HashMap. -/
+structure Fan (t : Type) (k : Type) (v : Type) where
+  /-- Select the event for a given key, creating it lazily on first use. -/
+  select : k → IO (Event t v)
 
 /-- Tag an event with the current value of a behavior (with explicit NodeId).
     On each event occurrence, samples the behavior and returns that value. -/
@@ -140,6 +147,33 @@ def leftmostWithId [Timeline t] (events : List (Event t a)) (nodeId : NodeId) : 
 def leftmost [Timeline t] (ctx : TimelineCtx t) (events : List (Event t a)) : IO (Event t a) := do
   let nodeId ← ctx.freshNodeId
   leftmostWithId events nodeId
+
+/-- Fan out an Event of HashMaps into per-key Events.
+    Creates a single subscription to the source event and dispatches only
+    to keys that have been selected. -/
+def fan [Timeline t] [BEq k] [Hashable k] (ctx : TimelineCtx t) (e : Event t (Std.HashMap k v))
+    : IO (Fan t k v) := do
+  let selectedRef ← IO.mkRef (∅ : Std.HashMap k (Event t v))
+  let _ ← Reactive.Event.subscribe e fun values => do
+    let selected ← selectedRef.get
+    for (k, v) in values do
+      match selected.get? k with
+      | some target => target.fire v
+      | none => pure ()
+  let selectFn := fun key => do
+    let selected ← selectedRef.get
+    match selected.get? key with
+    | some target => pure target
+    | none =>
+        let nodeId ← ctx.freshNodeId
+        let target ← Event.newNodeWithId nodeId (e.height.inc)
+        selectedRef.modify (·.insert key target)
+        pure target
+  pure ⟨selectFn⟩
+
+/-- Select a keyed Event from a fan-out selector. -/
+def select (fan : Fan t k v) (key : k) : IO (Event t v) :=
+  fan.select key
 
 /-- Split an event of Either into two events (with explicit NodeIds). -/
 def fanEitherWithId [Timeline t] (e : Event t (Sum a b)) (nodeIdL : NodeId) (nodeIdR : NodeId)

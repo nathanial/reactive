@@ -9,6 +9,7 @@ import Reactive.Core
 import Reactive.Class
 import Reactive.Combinators
 import Chronos
+import Std.Data.HashMap
 
 namespace Reactive.Host
 
@@ -587,6 +588,23 @@ def changesM (d : Dynamic Spider a) : SpiderM (Event Spider (a × a)) := ⟨fun 
   env.decrementDepth
   pure result⟩
 
+/-- Deduplicate a Dynamic's updates.
+    Only fires when the value actually changes.
+    Subscribes within the current scope for cleanup. -/
+def holdUniqDynM [BEq a] (d : Dynamic Spider a) : SpiderM (Dynamic Spider a) := ⟨fun env => do
+  let _ ← env.incrementDepth "Dynamic.holdUniqDynM"
+  let initial ← d.sample
+  let currentRef ← IO.mkRef initial
+  let (result, updateResult) ← createDynamic env.timelineCtx initial
+  let unsub ← Reactive.Event.subscribe d.updated fun newVal => do
+    let current ← currentRef.get
+    if newVal != current then
+      currentRef.set newVal
+      updateResult newVal
+  env.currentScope.register unsub
+  env.decrementDepth
+  pure result⟩
+
 /-- Switch/join a Dynamic of Dynamics into a single Dynamic.
     The result updates when either the outer changes or the current inner changes.
     All subscriptions are registered with the current scope. -/
@@ -826,6 +844,36 @@ def leftmostM (events : List (Event Spider a)) : SpiderM (Event Spider a) := ⟨
     env.currentScope.register unsub
   env.decrementDepth
   pure derived⟩
+
+/-- Fan out an Event of HashMaps into per-key Events, using a single subscription.
+    The fan-out subscription is registered with the current scope. -/
+def fanM [BEq k] [Hashable k] (e : Event Spider (Std.HashMap k v))
+    : SpiderM (Event.Fan Spider k v) := ⟨fun env => do
+  let _ ← env.incrementDepth "Event.fanM"
+  let selectedRef ← IO.mkRef (∅ : Std.HashMap k (Event Spider v))
+  let ctx := env.timelineCtx
+  let unsub ← Reactive.Event.subscribe e fun values => do
+    let selected ← selectedRef.get
+    for (k, v) in values do
+      match selected.get? k with
+      | some target => target.fire v
+      | none => pure ()
+  env.currentScope.register unsub
+  let selectFn := fun key => do
+    let selected ← selectedRef.get
+    match selected.get? key with
+    | some target => pure target
+    | none =>
+        let nodeId ← ctx.freshNodeId
+        let target ← Event.newNodeWithId nodeId (e.height.inc)
+        selectedRef.modify (·.insert key target)
+        pure target
+  env.decrementDepth
+  pure ⟨selectFn⟩⟩
+
+/-- Select a keyed Event from a fan-out selector within SpiderM. -/
+def selectM (fan : Event.Fan Spider k v) (key : k) : SpiderM (Event Spider v) :=
+  SpiderM.liftIO <| Event.select fan key
 
 /-- Fan out a Sum Event into two Events, auto-allocating NodeIds and registering with scope. -/
 def fanEitherM (e : Event Spider (Sum a b)) : SpiderM (Event Spider a × Event Spider b) := ⟨fun env => do

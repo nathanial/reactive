@@ -67,6 +67,25 @@ test "Dynamic.updated fires on changes" := do
 
   shouldBe result [1, 2, 3]
 
+test "Dynamic.holdUniqDynM filters duplicate updates" := do
+  let result ← runSpider do
+    let (event, trigger) ← newTriggerEvent (t := Spider) (a := Nat)
+    let dyn ← holdDyn 0 event
+    let uniq ← Dynamic.holdUniqDynM dyn
+
+    let changesRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
+    let _ ← SpiderM.liftIO <| uniq.updated.subscribe fun n =>
+      changesRef.modify (· ++ [n])
+
+    SpiderM.liftIO <| trigger 0  -- same as initial, should not fire
+    SpiderM.liftIO <| trigger 1
+    SpiderM.liftIO <| trigger 1
+    SpiderM.liftIO <| trigger 2
+    SpiderM.liftIO <| trigger 2
+
+    SpiderM.liftIO changesRef.get
+  shouldBe result [1, 2]
+
 test "Dynamic.current returns a Behavior" := do
   let result ← runSpider do
     let pair ← newTriggerEvent (t := Spider) (a := String)

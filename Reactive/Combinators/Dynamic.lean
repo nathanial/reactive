@@ -67,6 +67,26 @@ def changes [Timeline t] (ctx : TimelineCtx t) (d : Dynamic t a) : IO (Event t (
   let nodeId ← ctx.freshNodeId
   changesId d nodeId
 
+/-- Deduplicate a Dynamic's updates (with explicit NodeId).
+    Only fires when the value actually changes. -/
+def holdUniqDynWithId [Timeline t] [BEq a] (d : Dynamic t a) (nodeId : NodeId) : IO (Dynamic t a) := do
+  let initial ← d.sample
+  let currentRef ← IO.mkRef initial
+  let (result, updateResult) ← Reactive.Dynamic.newWithId initial nodeId
+  let _ ← Reactive.Event.subscribe d.updated fun newVal => do
+    let current ← currentRef.get
+    if newVal != current then
+      currentRef.set newVal
+      updateResult newVal
+  pure result
+
+/-- Deduplicate a Dynamic's updates.
+    Only fires when the value actually changes.
+    Requires TimelineCtx for type-safe timeline separation. -/
+def holdUniqDyn [Timeline t] [BEq a] (ctx : TimelineCtx t) (d : Dynamic t a) : IO (Dynamic t a) := do
+  let nodeId ← ctx.freshNodeId
+  holdUniqDynWithId d nodeId
+
 /-- Builder monad for creating derived Dynamics with Functor/Applicative syntax.
     Carries a TimelineCtx for NodeId allocation.
     Note: uses raw Dynamic combinators (no BEq-based deduplication). -/

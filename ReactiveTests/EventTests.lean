@@ -1,5 +1,6 @@
 import Crucible
 import Reactive
+import Std.Data.HashMap
 
 namespace ReactiveTests.EventTests
 
@@ -359,6 +360,33 @@ test "Event.fanEitherM splits Sum event into two" := do
     let right ← SpiderM.liftIO rightRef.get
     pure (left, right)
   shouldBe result ([1, 2], ["hello", "world"])
+
+test "Event.fanM/selectM dispatches per key" := do
+  let result ← runSpider do
+    let (event, trigger) ← newTriggerEvent (t := Spider) (a := Std.HashMap Nat String)
+    let fan ← Event.fanM event
+    let ones ← Event.selectM fan 1
+    let twos ← Event.selectM fan 2
+
+    let onesRef ← SpiderM.liftIO <| IO.mkRef ([] : List String)
+    let twosRef ← SpiderM.liftIO <| IO.mkRef ([] : List String)
+    let _ ← SpiderM.liftIO <| ones.subscribe fun v =>
+      onesRef.modify (· ++ [v])
+    let _ ← SpiderM.liftIO <| twos.subscribe fun v =>
+      twosRef.modify (· ++ [v])
+
+    let map1 : Std.HashMap Nat String := Std.HashMap.ofList [(1, "a"), (3, "skip")]
+    let map2 : Std.HashMap Nat String := Std.HashMap.ofList [(2, "b"), (1, "c")]
+    let map3 : Std.HashMap Nat String := Std.HashMap.ofList [(3, "ignore")]
+
+    SpiderM.liftIO <| trigger map1
+    SpiderM.liftIO <| trigger map2
+    SpiderM.liftIO <| trigger map3
+
+    let onesVals ← SpiderM.liftIO onesRef.get
+    let twosVals ← SpiderM.liftIO twosRef.get
+    pure (onesVals, twosVals)
+  shouldBe result (["a", "c"], ["b"])
 
 test "Event.accumulateM maintains running state" := do
   let result ← runSpider do
