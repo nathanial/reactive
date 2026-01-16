@@ -906,10 +906,11 @@ abbrev scanM := @accumulateM
 def switchDynM (de : Dynamic Spider (Event Spider a)) : SpiderM (Event Spider a) := ⟨fun env => do
   let _ ← env.incrementDepth "Event.switchDynM"
   let nodeId ← env.timelineCtx.freshNodeId
-  let derived ← Event.newNodeWithId nodeId ⟨0⟩
   let currentUnsubRef ← IO.mkRef (pure () : IO Unit)
 
   let initialEvent ← de.sample
+  let derivedHeight := Height.inc (max initialEvent.height de.updated.height)
+  let derived ← Event.newNodeWithId nodeId derivedHeight
   let unsub ← Reactive.Event.subscribe initialEvent derived.fire
   currentUnsubRef.set unsub
 
