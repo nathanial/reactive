@@ -203,6 +203,55 @@ test "Event.withPrevious with pure IO" := do
     SpiderM.liftIO receivedRef.get
   shouldBe result [(1, 2), (2, 3)]
 
+test "Event.distinctM skips consecutive duplicates" := do
+  let result ← runSpider do
+    let (event, trigger) ← newTriggerEvent (t := Spider) (a := Nat)
+    let unique ← Event.distinctM event
+
+    let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
+    let _ ← SpiderM.liftIO <| unique.subscribe fun n =>
+      receivedRef.modify (· ++ [n])
+
+    SpiderM.liftIO <| trigger 1
+    SpiderM.liftIO <| trigger 1  -- duplicate, skipped
+    SpiderM.liftIO <| trigger 2
+    SpiderM.liftIO <| trigger 2  -- duplicate, skipped
+    SpiderM.liftIO <| trigger 2  -- duplicate, skipped
+    SpiderM.liftIO <| trigger 1  -- different from previous, fires
+    SpiderM.liftIO <| trigger 3
+    SpiderM.liftIO receivedRef.get
+  shouldBe result [1, 2, 1, 3]
+
+test "Event.distinctM fires first value" := do
+  let result ← runSpider do
+    let (event, trigger) ← newTriggerEvent (t := Spider) (a := String)
+    let unique ← Event.distinctM event
+
+    let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List String)
+    let _ ← SpiderM.liftIO <| unique.subscribe fun s =>
+      receivedRef.modify (· ++ [s])
+
+    SpiderM.liftIO <| trigger "hello"
+    SpiderM.liftIO receivedRef.get
+  shouldBe result ["hello"]
+
+test "Event.distinct with pure IO" := do
+  let result ← runSpider do
+    let ctx ← SpiderM.getTimelineCtx
+    let (event, trigger) ← newTriggerEvent (t := Spider) (a := Nat)
+    let unique ← SpiderM.liftIO <| Event.distinct ctx event
+
+    let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
+    let _ ← SpiderM.liftIO <| unique.subscribe fun n =>
+      receivedRef.modify (· ++ [n])
+
+    SpiderM.liftIO <| trigger 5
+    SpiderM.liftIO <| trigger 5
+    SpiderM.liftIO <| trigger 10
+    SpiderM.liftIO <| trigger 5
+    SpiderM.liftIO receivedRef.get
+  shouldBe result [5, 10, 5]
+
 test "Event.takeNM takes first n occurrences" := do
   let result ← runSpider do
     let (event, trigger) ← newTriggerEvent (t := Spider) (a := Nat)

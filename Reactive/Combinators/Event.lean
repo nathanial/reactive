@@ -390,6 +390,38 @@ def withPrevious [Timeline t] (ctx : TimelineCtx t) (e : Event t a) : IO (Event 
   let nodeId ← ctx.freshNodeId
   withPreviousWithId e nodeId
 
+/-- Skip consecutive duplicate values (with explicit NodeId).
+    Requires BEq to compare values. Only fires when value differs from previous. -/
+def distinctWithId [Timeline t] [BEq a] (e : Event t a) (nodeId : NodeId) : IO (Event t a) := do
+  let prevRef ← IO.mkRef (none : Option a)
+  let derived ← Event.newNodeWithId nodeId (e.height.inc)
+  let _ ← Reactive.Event.subscribe e fun curr => do
+    let prev ← prevRef.get
+    let shouldFire := match prev with
+      | none => true  -- First value always fires
+      | some p => curr != p
+    if shouldFire then
+      prevRef.set (some curr)
+      derived.fire curr
+  pure derived
+
+/-- Skip consecutive duplicate values.
+    Requires BEq to compare values. Only fires when value differs from previous.
+    Common need to avoid redundant downstream updates.
+
+    Example:
+    ```
+    let mouseX : Event Spider Int := ...
+    let uniqueX ← Event.distinct ctx mouseX
+    -- uniqueX only fires when X actually changes
+    ``` -/
+def distinct [Timeline t] [BEq a] (ctx : TimelineCtx t) (e : Event t a) : IO (Event t a) := do
+  let nodeId ← ctx.freshNodeId
+  distinctWithId e nodeId
+
+/-- Alias for distinct (familiar name from RxJS/reactive libraries). -/
+abbrev dedupe := @distinct
+
 /-- Combine two events that fire simultaneously (with explicit NodeId).
     If both events fire in the same frame, fires once with paired values.
     If only one fires, nothing is emitted for that occurrence. -/

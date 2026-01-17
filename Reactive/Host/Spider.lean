@@ -1027,6 +1027,34 @@ def withPreviousM (e : Event Spider a) : SpiderM (Event Spider (a × a)) := ⟨f
 def withPrevious' (e : Event Spider a) : SpiderM (Event Spider (a × a)) :=
   withPreviousM e
 
+/-- Skip consecutive duplicate values.
+    Requires BEq to compare values. Only fires when value differs from previous. -/
+def distinctM [BEq a] (e : Event Spider a) : SpiderM (Event Spider a) := ⟨fun env => do
+  let nodeId ← env.timelineCtx.freshNodeId
+  let prevRef ← IO.mkRef (none : Option a)
+  let derived ← Event.newNodeWithId nodeId (e.height.inc)
+  let unsub ← Reactive.Event.subscribe e fun curr => do
+    let prev ← prevRef.get
+    let shouldFire := match prev with
+      | none => true
+      | some p => curr != p
+    if shouldFire then
+      prevRef.set (some curr)
+      derived.fire curr
+  env.currentScope.register unsub
+  pure derived⟩
+
+/-- Skip consecutive duplicate values (fluent style).
+    Enables: `event.distinct'` -/
+def distinct' [BEq a] (e : Event Spider a) : SpiderM (Event Spider a) :=
+  distinctM e
+
+/-- Alias for distinctM (familiar name from RxJS/reactive libraries). -/
+abbrev dedupeM := @distinctM
+
+/-- Alias for distinct' (familiar name from RxJS/reactive libraries). -/
+abbrev dedupe' := @distinct'
+
 /-- Combine two Events that fire simultaneously, auto-allocating NodeId
     and registering with scope.
     If both events fire in the same frame, fires once with paired values.
