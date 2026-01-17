@@ -103,6 +103,31 @@ def foldB [Timeline t] (f : a → b → b) (initial : b) (event : Event t a) : I
     valueRef.set (f a old)
   Pure.pure (Behavior.fromSample valueRef.get)
 
+/-- Sample from a nested behavior (Behavior of Behaviors).
+    Allows dynamic behavior switching based on another behavior's value.
+
+    When sampled, first samples the outer behavior to get the inner behavior,
+    then samples that inner behavior.
+
+    Example:
+    ```
+    let mode : Behavior t Mode := ...
+    let behaviors : Behavior t (Behavior t Int) := mode.map fun m =>
+      match m with
+      | .fast => fastBehavior
+      | .slow => slowBehavior
+    let current ← Behavior.switch behaviors
+    -- current samples whichever behavior mode currently selects
+    ```
+-/
+def switch (bb : Behavior t (Behavior t a)) : Behavior t a :=
+  ⟨do
+    let b ← bb.sampleIO
+    b.sampleIO⟩
+
+/-- Alias for switch (monadic join). -/
+abbrev join := @switch
+
 end Behavior
 
 instance : Functor (Behavior t) where

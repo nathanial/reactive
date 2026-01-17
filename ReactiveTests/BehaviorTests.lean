@@ -269,6 +269,34 @@ test "Behavior anyTrue with empty list returns false" := do
   let value ← result.sample
   shouldBe value false
 
+test "Behavior.switch samples nested behavior" := do
+  let inner1 : Behavior Spider Nat := Behavior.constant 10
+  let inner2 : Behavior Spider Nat := Behavior.constant 20
+  let selectorRef ← IO.mkRef inner1
+  let outer : Behavior Spider (Behavior Spider Nat) := Behavior.fromSample selectorRef.get
+  let switched := Behavior.switch outer
+  let v1 ← switched.sample
+  selectorRef.set inner2
+  let v2 ← switched.sample
+  shouldBe (v1, v2) (10, 20)
+
+test "Behavior.switch with dynamic inner behaviors" := do
+  let valueRef ← IO.mkRef (100 : Nat)
+  let dynamicInner : Behavior Spider Nat := Behavior.fromSample valueRef.get
+  let outer : Behavior Spider (Behavior Spider Nat) := Behavior.constant dynamicInner
+  let switched := Behavior.switch outer
+  let v1 ← switched.sample
+  valueRef.set 200
+  let v2 ← switched.sample
+  shouldBe (v1, v2) (100, 200)
+
+test "Behavior.join is alias for switch" := do
+  let inner : Behavior Spider String := Behavior.constant "hello"
+  let outer : Behavior Spider (Behavior Spider String) := Behavior.constant inner
+  let joined := Behavior.join outer
+  let value ← joined.sample
+  shouldBe value "hello"
+
 #generate_tests
 
 end ReactiveTests.BehaviorTests
