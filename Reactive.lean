@@ -55,4 +55,3 @@ import Reactive.Core
 import Reactive.Class
 import Reactive.Combinators
 import Reactive.Host
-import Reactive.Proofs
