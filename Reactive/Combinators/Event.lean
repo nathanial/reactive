@@ -422,6 +422,36 @@ def distinct [Timeline t] [BEq a] (ctx : TimelineCtx t) (e : Event t a) : IO (Ev
 /-- Alias for distinct (familiar name from RxJS/reactive libraries). -/
 abbrev dedupe := @distinct
 
+/-- Collect n events before emitting them as a batch (with explicit NodeId).
+    Useful for batch processing patterns. -/
+def bufferWithId [Timeline t] (n : Nat) (e : Event t a) (nodeId : NodeId)
+    : IO (Event t (Array a)) := do
+  let bufRef ← IO.mkRef (#[] : Array a)
+  let derived ← Event.newNodeWithId nodeId (e.height.inc)
+  let _ ← Reactive.Event.subscribe e fun a => do
+    let buf ← bufRef.get
+    let newBuf := buf.push a
+    if newBuf.size >= n then
+      bufRef.set #[]
+      derived.fire newBuf
+    else
+      bufRef.set newBuf
+  pure derived
+
+/-- Collect n events before emitting them as a batch.
+    Useful for batch processing patterns.
+
+    Example:
+    ```
+    let clicks : Event Spider Unit := ...
+    let batches ← Event.buffer ctx 5 clicks
+    -- batches fires with array of 5 clicks
+    ``` -/
+def buffer [Timeline t] (ctx : TimelineCtx t) (n : Nat) (e : Event t a)
+    : IO (Event t (Array a)) := do
+  let nodeId ← ctx.freshNodeId
+  bufferWithId n e nodeId
+
 /-- Combine two events that fire simultaneously (with explicit NodeId).
     If both events fire in the same frame, fires once with paired values.
     If only one fires, nothing is emitted for that occurrence. -/

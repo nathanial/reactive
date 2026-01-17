@@ -252,6 +252,58 @@ test "Event.distinct with pure IO" := do
     SpiderM.liftIO receivedRef.get
   shouldBe result [5, 10, 5]
 
+test "Event.bufferM collects n events before emitting" := do
+  let result ← runSpider do
+    let (event, trigger) ← newTriggerEvent (t := Spider) (a := Nat)
+    let batched ← Event.bufferM 3 event
+
+    let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List (Array Nat))
+    let _ ← SpiderM.liftIO <| batched.subscribe fun arr =>
+      receivedRef.modify (· ++ [arr])
+
+    SpiderM.liftIO <| trigger 1
+    SpiderM.liftIO <| trigger 2
+    SpiderM.liftIO <| trigger 3  -- batch emits here
+    SpiderM.liftIO <| trigger 4
+    SpiderM.liftIO <| trigger 5
+    SpiderM.liftIO <| trigger 6  -- batch emits here
+    SpiderM.liftIO <| trigger 7
+    SpiderM.liftIO receivedRef.get
+  shouldBe result [#[1, 2, 3], #[4, 5, 6]]
+
+test "Event.bufferM with incomplete batch" := do
+  let result ← runSpider do
+    let (event, trigger) ← newTriggerEvent (t := Spider) (a := String)
+    let batched ← Event.bufferM 4 event
+
+    let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List (Array String))
+    let _ ← SpiderM.liftIO <| batched.subscribe fun arr =>
+      receivedRef.modify (· ++ [arr])
+
+    SpiderM.liftIO <| trigger "a"
+    SpiderM.liftIO <| trigger "b"
+    SpiderM.liftIO <| trigger "c"
+    -- Only 3 events, buffer size is 4, so no emission
+    SpiderM.liftIO receivedRef.get
+  shouldBe result []
+
+test "Event.buffer with pure IO" := do
+  let result ← runSpider do
+    let ctx ← SpiderM.getTimelineCtx
+    let (event, trigger) ← newTriggerEvent (t := Spider) (a := Nat)
+    let batched ← SpiderM.liftIO <| Event.buffer ctx 2 event
+
+    let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List (Array Nat))
+    let _ ← SpiderM.liftIO <| batched.subscribe fun arr =>
+      receivedRef.modify (· ++ [arr])
+
+    SpiderM.liftIO <| trigger 10
+    SpiderM.liftIO <| trigger 20
+    SpiderM.liftIO <| trigger 30
+    SpiderM.liftIO <| trigger 40
+    SpiderM.liftIO receivedRef.get
+  shouldBe result [#[10, 20], #[30, 40]]
+
 test "Event.takeNM takes first n occurrences" := do
   let result ← runSpider do
     let (event, trigger) ← newTriggerEvent (t := Spider) (a := Nat)

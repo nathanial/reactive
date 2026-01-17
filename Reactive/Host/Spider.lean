@@ -1055,6 +1055,28 @@ abbrev dedupeM := @distinctM
 /-- Alias for distinct' (familiar name from RxJS/reactive libraries). -/
 abbrev dedupe' := @distinct'
 
+/-- Collect n events before emitting them as a batch.
+    Useful for batch processing patterns. -/
+def bufferM (n : Nat) (e : Event Spider a) : SpiderM (Event Spider (Array a)) := ⟨fun env => do
+  let nodeId ← env.timelineCtx.freshNodeId
+  let bufRef ← IO.mkRef (#[] : Array a)
+  let derived ← Event.newNodeWithId nodeId (e.height.inc)
+  let unsub ← Reactive.Event.subscribe e fun a => do
+    let buf ← bufRef.get
+    let newBuf := buf.push a
+    if newBuf.size >= n then
+      bufRef.set #[]
+      derived.fire newBuf
+    else
+      bufRef.set newBuf
+  env.currentScope.register unsub
+  pure derived⟩
+
+/-- Collect n events before emitting them as a batch (fluent style).
+    Enables: `event.buffer' 5` -/
+def buffer' (e : Event Spider a) (n : Nat) : SpiderM (Event Spider (Array a)) :=
+  bufferM n e
+
 /-- Combine two Events that fire simultaneously, auto-allocating NodeId
     and registering with scope.
     If both events fire in the same frame, fires once with paired values.
