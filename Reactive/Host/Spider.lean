@@ -691,6 +691,16 @@ namespace Event
 protected def subscribeM (e : Event Spider a) (callback : Subscriber a) : SpiderM (IO Unit) :=
   ⟨fun env => Reactive.Event.subscribeScoped e env.currentScope callback⟩
 
+/-- The event that never fires.
+    Useful as a placeholder or identity for merge operations. -/
+def neverM : SpiderM (Event Spider a) := ⟨fun env => do
+  let ctx := env.timelineCtx
+  Event.never ctx⟩
+
+/-- The event that never fires (fluent style).
+    Enables: `Event.never'` -/
+abbrev never' : SpiderM (Event Spider a) := neverM
+
 /-- Map a function over an Event, auto-allocating NodeId and registering with scope. -/
 def mapM (f : a → b) (e : Event Spider a) : SpiderM (Event Spider b) := ⟨fun env => do
   let _ ← env.incrementDepth "Event.mapM"

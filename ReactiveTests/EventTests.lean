@@ -321,6 +321,16 @@ test "Event.never never fires" := do
     SpiderM.liftIO receivedRef.get
   shouldBe result []
 
+test "Event.neverM never fires (SpiderM version)" := do
+  let result ← runSpider do
+    let neverEvent ← Event.neverM (a := String)
+    let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List String)
+    let _ ← SpiderM.liftIO <| neverEvent.subscribe fun s =>
+      receivedRef.modify (· ++ [s])
+    -- The event never fires, so receivedRef should stay empty
+    SpiderM.liftIO receivedRef.get
+  shouldBe result []
+
 test "Event.mapMaybeM filters and transforms" := do
   let result ← runSpider do
     let (event, trigger) ← newTriggerEvent (t := Spider) (a := Nat)
