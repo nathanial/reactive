@@ -1006,6 +1006,27 @@ def accumulateM (f : a → b → b) (initial : b) (e : Event Spider a)
 /-- Alias for accumulateM (familiar name from other FRP libraries). -/
 abbrev scanM := @accumulateM
 
+/-- Emit (previous, current) pairs on each event occurrence.
+    Skips the first occurrence since there's no previous value.
+    Useful for detecting changes and computing deltas. -/
+def withPreviousM (e : Event Spider a) : SpiderM (Event Spider (a × a)) := ⟨fun env => do
+  let nodeId ← env.timelineCtx.freshNodeId
+  let prevRef ← IO.mkRef (none : Option a)
+  let derived ← Event.newNodeWithId nodeId (e.height.inc)
+  let unsub ← Reactive.Event.subscribe e fun curr => do
+    let prev ← prevRef.get
+    prevRef.set (some curr)
+    match prev with
+    | some p => derived.fire (p, curr)
+    | none => pure ()
+  env.currentScope.register unsub
+  pure derived⟩
+
+/-- Emit (previous, current) pairs on each event occurrence (fluent style).
+    Enables: `event.withPrevious'` -/
+def withPrevious' (e : Event Spider a) : SpiderM (Event Spider (a × a)) :=
+  withPreviousM e
+
 /-- Combine two Events that fire simultaneously, auto-allocating NodeId
     and registering with scope.
     If both events fire in the same frame, fires once with paired values.

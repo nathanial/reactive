@@ -156,6 +156,53 @@ test "Event.scanM accumulates values" := do
     SpiderM.liftIO receivedRef.get
   shouldBe result [1, 3, 6]
 
+test "Event.withPreviousM emits (prev, curr) pairs" := do
+  let result ← runSpider do
+    let (event, trigger) ← newTriggerEvent (t := Spider) (a := Nat)
+    let pairs ← Event.withPreviousM event
+
+    let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List (Nat × Nat))
+    let _ ← SpiderM.liftIO <| pairs.subscribe fun p =>
+      receivedRef.modify (· ++ [p])
+
+    SpiderM.liftIO <| trigger 10
+    SpiderM.liftIO <| trigger 20
+    SpiderM.liftIO <| trigger 15
+    SpiderM.liftIO <| trigger 30
+    SpiderM.liftIO receivedRef.get
+  -- First occurrence (10) is skipped since there's no previous
+  shouldBe result [(10, 20), (20, 15), (15, 30)]
+
+test "Event.withPreviousM skips first occurrence" := do
+  let result ← runSpider do
+    let (event, trigger) ← newTriggerEvent (t := Spider) (a := String)
+    let pairs ← Event.withPreviousM event
+
+    let countRef ← SpiderM.liftIO <| IO.mkRef 0
+    let _ ← SpiderM.liftIO <| pairs.subscribe fun _ =>
+      countRef.modify (· + 1)
+
+    -- Fire only once - should produce no output
+    SpiderM.liftIO <| trigger "only"
+    SpiderM.liftIO countRef.get
+  shouldBe result 0
+
+test "Event.withPrevious with pure IO" := do
+  let result ← runSpider do
+    let ctx ← SpiderM.getTimelineCtx
+    let (event, trigger) ← newTriggerEvent (t := Spider) (a := Nat)
+    let pairs ← SpiderM.liftIO <| Event.withPrevious ctx event
+
+    let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List (Nat × Nat))
+    let _ ← SpiderM.liftIO <| pairs.subscribe fun p =>
+      receivedRef.modify (· ++ [p])
+
+    SpiderM.liftIO <| trigger 1
+    SpiderM.liftIO <| trigger 2
+    SpiderM.liftIO <| trigger 3
+    SpiderM.liftIO receivedRef.get
+  shouldBe result [(1, 2), (2, 3)]
+
 test "Event.takeNM takes first n occurrences" := do
   let result ← runSpider do
     let (event, trigger) ← newTriggerEvent (t := Spider) (a := Nat)

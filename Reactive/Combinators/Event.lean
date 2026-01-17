@@ -362,6 +362,34 @@ def accumulate [Timeline t] (ctx : TimelineCtx t) (f : a → b → b) (initial :
     Like foldDyn but returns an Event instead of a Dynamic. -/
 abbrev scan := @accumulate
 
+/-- Emit (previous, current) pairs on each event occurrence (with explicit NodeId).
+    Skips the first occurrence since there's no previous value.
+    Useful for detecting changes and computing deltas. -/
+def withPreviousWithId [Timeline t] (e : Event t a) (nodeId : NodeId) : IO (Event t (a × a)) := do
+  let prevRef ← IO.mkRef (none : Option a)
+  let derived ← Event.newNodeWithId nodeId (e.height.inc)
+  let _ ← Reactive.Event.subscribe e fun curr => do
+    let prev ← prevRef.get
+    prevRef.set (some curr)
+    match prev with
+    | some p => derived.fire (p, curr)
+    | none => pure ()
+  pure derived
+
+/-- Emit (previous, current) pairs on each event occurrence.
+    Skips the first occurrence since there's no previous value.
+    Useful for detecting changes and computing deltas.
+
+    Example:
+    ```
+    let positions : Event Spider Float := ...
+    let deltas ← Event.withPrevious ctx positions
+    -- deltas fires with (oldPos, newPos) for computing velocity
+    ``` -/
+def withPrevious [Timeline t] (ctx : TimelineCtx t) (e : Event t a) : IO (Event t (a × a)) := do
+  let nodeId ← ctx.freshNodeId
+  withPreviousWithId e nodeId
+
 /-- Combine two events that fire simultaneously (with explicit NodeId).
     If both events fire in the same frame, fires once with paired values.
     If only one fires, nothing is emitted for that occurrence. -/
