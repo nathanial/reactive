@@ -247,6 +247,21 @@ def splitE [Timeline t] (ctx : TimelineCtx t) (p : a → Bool) (e : Event t a)
   let nodeIdF ← ctx.freshNodeId
   splitEWithId p e nodeIdT nodeIdF
 
+/-- Partition an event into two based on a predicate (with explicit NodeIds).
+    Returns (matching, nonMatching) where matching fires when predicate is true.
+    Alias for splitEWithId with Haskell-style naming. -/
+abbrev partitionEWithId := @splitEWithId
+
+/-- Partition an event into two based on a predicate.
+    Returns (matching, nonMatching) where matching fires when predicate is true.
+    Alias for splitE with Haskell-style naming.
+
+    Example:
+    ```
+    let (evens, odds) ← Event.partitionE ctx (· % 2 == 0) numbers
+    ``` -/
+abbrev partitionE := @splitE
+
 /-- Delay an event by one propagation frame (with explicit NodeId).
     Useful for breaking dependency cycles.
 

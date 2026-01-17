@@ -448,6 +448,51 @@ test "Event.splitE with pure IO" := do
     pure (shortVals, longVals)
   shouldBe result (["hi", "yo"], ["hello", "world"])
 
+test "Event.partitionEM is an alias for splitEM" := do
+  let result ← runSpider do
+    let (event, trigger) ← newTriggerEvent (t := Spider) (a := Nat)
+    let (passing, failing) ← Event.partitionEM (· > 5) event
+
+    let passRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
+    let failRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
+    let _ ← SpiderM.liftIO <| passing.subscribe fun n =>
+      passRef.modify (· ++ [n])
+    let _ ← SpiderM.liftIO <| failing.subscribe fun n =>
+      failRef.modify (· ++ [n])
+
+    SpiderM.liftIO <| trigger 3
+    SpiderM.liftIO <| trigger 7
+    SpiderM.liftIO <| trigger 2
+    SpiderM.liftIO <| trigger 10
+
+    let passVals ← SpiderM.liftIO passRef.get
+    let failVals ← SpiderM.liftIO failRef.get
+    pure (passVals, failVals)
+  shouldBe result ([7, 10], [3, 2])
+
+test "Event.partitionE with pure IO" := do
+  let result ← runSpider do
+    let ctx ← SpiderM.getTimelineCtx
+    let (event, trigger) ← newTriggerEvent (t := Spider) (a := Nat)
+    let (positive, nonPositive) ← SpiderM.liftIO <| Event.partitionE ctx (· > 0) event
+
+    let posRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
+    let nonPosRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
+    let _ ← SpiderM.liftIO <| positive.subscribe fun n =>
+      posRef.modify (· ++ [n])
+    let _ ← SpiderM.liftIO <| nonPositive.subscribe fun n =>
+      nonPosRef.modify (· ++ [n])
+
+    SpiderM.liftIO <| trigger 0
+    SpiderM.liftIO <| trigger 5
+    SpiderM.liftIO <| trigger 0
+    SpiderM.liftIO <| trigger 3
+
+    let posVals ← SpiderM.liftIO posRef.get
+    let nonPosVals ← SpiderM.liftIO nonPosRef.get
+    pure (posVals, nonPosVals)
+  shouldBe result ([5, 3], [0, 0])
+
 test "Event.fanM/selectM dispatches per key" := do
   let result ← runSpider do
     let (event, trigger) ← newTriggerEvent (t := Spider) (a := Std.HashMap Nat String)

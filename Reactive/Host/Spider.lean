@@ -928,6 +928,16 @@ def splitE' (e : Event Spider a) (p : a → Bool)
     : SpiderM (Event Spider a × Event Spider a) :=
   splitEM p e
 
+/-- Partition an event into two based on a predicate.
+    Returns (matching, nonMatching) where matching fires when predicate is true.
+    Alias for splitEM with Haskell-style naming. -/
+abbrev partitionEM := @splitEM
+
+/-- Partition an event into two based on a predicate (fluent style).
+    Enables: `event.partitionE' predicate`
+    Alias for splitE' with Haskell-style naming. -/
+abbrev partitionE' := @splitE'
+
 /-- Delay an Event by one propagation frame, auto-allocating NodeId and registering with scope.
     Useful for breaking dependency cycles. -/
 def delayFrameM (e : Event Spider a) : SpiderM (Event Spider a) := ⟨fun env => do
