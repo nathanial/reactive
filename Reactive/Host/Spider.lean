@@ -486,11 +486,26 @@ registered with the scope via a post-creation subscription to the updated event.
 namespace Dynamic
 
 /-- Map a function over a Dynamic, auto-allocating NodeId and registering with scope.
-    Only fires the change event when the mapped value actually changes. -/
-def mapM [BEq b] (f : a → b) (da : Dynamic Spider a) : SpiderM (Dynamic Spider b) := ⟨fun env => do
+    Fires on every source update (no deduplication). Use `mapUniqM` for deduplication. -/
+def mapM (f : a → b) (da : Dynamic Spider a) : SpiderM (Dynamic Spider b) := ⟨fun env => do
   let _ ← env.incrementDepth "Dynamic.mapM"
   let nodeId ← env.timelineCtx.freshNodeId
-  -- Use existing IO-based map (which creates its own internal subscription)
+  -- Use raw map (no deduplication) - matches Reflex FRP semantics
+  let result ← Dynamic.mapWithIdRaw f da nodeId
+  -- Register a subscription to the source's updated event
+  -- This tracks the subscription for cleanup
+  let unsub ← Reactive.Event.subscribe da.updated fun _ => pure ()
+  env.currentScope.register unsub
+  env.decrementDepth
+  pure result⟩
+
+/-- Map a function over a Dynamic with deduplication.
+    Only fires the change event when the mapped value actually changes.
+    Use this when you want to avoid redundant updates. -/
+def mapUniqM [BEq b] (f : a → b) (da : Dynamic Spider a) : SpiderM (Dynamic Spider b) := ⟨fun env => do
+  let _ ← env.incrementDepth "Dynamic.mapUniqM"
+  let nodeId ← env.timelineCtx.freshNodeId
+  -- Use deduplicating map
   let result ← Dynamic.mapWithId f da nodeId
   -- Register a subscription to the source's updated event
   -- This tracks the subscription for cleanup
@@ -545,8 +560,13 @@ dynA.map' f >>= (·.zipWith' g dynB)
 
 /-- Map a function over a Dynamic (fluent style).
     Enables: `dynamic.map' f` -/
-def map' [BEq b] (da : Dynamic Spider a) (f : a → b) : SpiderM (Dynamic Spider b) :=
+def map' (da : Dynamic Spider a) (f : a → b) : SpiderM (Dynamic Spider b) :=
   mapM f da
+
+/-- Map a function over a Dynamic with deduplication (fluent style).
+    Enables: `dynamic.mapUniq' f` -/
+def mapUniq' [BEq b] (da : Dynamic Spider a) (f : a → b) : SpiderM (Dynamic Spider b) :=
+  mapUniqM f da
 
 /-- Combine with another Dynamic (fluent style).
     Enables: `dynA.zipWith' f dynB` -/

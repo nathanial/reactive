@@ -590,8 +590,8 @@ test "perf: 1000 Dynamic.mapM from single source, 60 updates (simulating 60fps)"
     pure (updateCount, elapsed)
 
   -- 1000 derived dynamics * 60 fires = 60,000 updates
-  -- (first fire is to value 0.0 which may not trigger updates if initial was 0.0)
-  shouldBe result.1 59000
+  -- (mapM no longer deduplicates - use mapUniqM for deduplication)
+  shouldBe result.1 60000
   IO.println s!"  [1000 Dynamic.mapM x 60 fires: {result.2}]"
 
 test "perf: 1000 Dynamic.mapM creation time" := do

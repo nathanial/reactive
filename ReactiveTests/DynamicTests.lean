@@ -341,11 +341,13 @@ test "Multiple Dynamic.mapM with subscriptions" := do
     let u2 ← SpiderM.liftIO <| updates2.get
     pure (u1, u2)
 
-  -- derived1 updates: false→true (input1), true→false (input2), stays false (none)
-  -- derived2 updates: false→false (input1, no change), false→true (input2), true→false (none)
+  -- mapM doesn't deduplicate, so all updates fire:
+  -- derived1: true (input1), false (input2), false (none)
+  -- derived2: false (input1), true (input2), false (none)
+  -- Use mapUniqM instead if deduplication is desired.
   shouldBe result (
-    [true, false],      -- derived1: became true, then false
-    [true, false]       -- derived2: became true, then false
+    [true, false, false],   -- derived1: all 3 updates fire
+    [false, true, false]    -- derived2: all 3 updates fire
   )
 
 #generate_tests
