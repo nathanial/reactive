@@ -1340,6 +1340,42 @@ def throttleM (d : Chronos.Duration) (e : Event Spider a)
     env.currentScope.register unsub
     pure derived⟩
 
+/-- Collect events within a time window and emit as batch.
+    Uses tumbling windows: collects events for the duration, emits, then resets.
+    The window starts when the first event arrives.
+    Subscription is registered with current scope. -/
+def windowM (d : Chronos.Duration) (e : Event Spider a) : SpiderM (Event Spider (Array a)) :=
+  ⟨fun env => do
+    let nodeId ← env.timelineCtx.freshNodeId
+    let derived ← Event.newNodeWithId nodeId (e.height.inc)
+    let bufferRef ← IO.mkRef (#[] : Array a)
+    let windowActiveRef ← IO.mkRef false
+    let generationRef ← IO.mkRef (0 : Nat)
+
+    let unsub ← Reactive.Event.subscribe e fun a => do
+      -- Add to buffer
+      bufferRef.modify (·.push a)
+
+      -- Start window timer if not already active
+      let wasActive ← windowActiveRef.modifyGet fun active => (active, true)
+      if !wasActive then
+        let gen ← generationRef.modifyGet fun g => (g + 1, g + 1)
+        -- Spawn timer that fires after window duration
+        let _ ← IO.asTask (prio := .dedicated) do
+          let ms := d.toMilliseconds.toNat
+          IO.sleep (UInt32.ofNat ms)
+          -- Check generation to ensure we haven't been disposed
+          let currentGen ← generationRef.get
+          if gen == currentGen then
+            -- Collect and emit buffer
+            let batch ← bufferRef.modifyGet fun buf => (buf, #[])
+            windowActiveRef.set false
+            if batch.size > 0 then
+              env.withFrame (derived.fire batch)
+
+    env.currentScope.register unsub
+    pure derived⟩
+
 /-! ### Fluent Chainable Combinators
 
 Extension methods enabling dot-notation chaining:
@@ -1438,6 +1474,11 @@ def debounce' (e : Event Spider a) (d : Chronos.Duration) : SpiderM (Event Spide
 def throttle' (e : Event Spider a) (d : Chronos.Duration)
     (leading : Bool := true) (trailing : Bool := true) : SpiderM (Event Spider a) :=
   throttleM d e leading trailing
+
+/-- Collect events within a time window and emit as batch (fluent style).
+    Enables: `event.window' duration` -/
+def window' (e : Event Spider a) (d : Chronos.Duration) : SpiderM (Event Spider (Array a)) :=
+  windowM d e
 
 /-- Split Sum into two events (fluent style).
     Enables: `event.fanEither'` -/

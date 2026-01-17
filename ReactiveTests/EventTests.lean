@@ -304,6 +304,45 @@ test "Event.buffer with pure IO" := do
     SpiderM.liftIO receivedRef.get
   shouldBe result [#[10, 20], #[30, 40]]
 
+test "Event.windowM collects events within time window" := do
+  let result ← runSpider do
+    let (event, trigger) ← newTriggerEvent (t := Spider) (a := Nat)
+    let windowed ← Event.windowM (Chronos.Duration.fromMilliseconds 50) event
+
+    let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List (Array Nat))
+    let _ ← SpiderM.liftIO <| windowed.subscribe fun arr =>
+      receivedRef.modify (· ++ [arr])
+
+    -- Fire several events quickly (within window)
+    SpiderM.liftIO <| trigger 1
+    SpiderM.liftIO <| trigger 2
+    SpiderM.liftIO <| trigger 3
+    -- Wait for window to close
+    SpiderM.liftIO <| IO.sleep 80
+    SpiderM.liftIO receivedRef.get
+  shouldBe result [#[1, 2, 3]]
+
+test "Event.windowM emits multiple windows" := do
+  let result ← runSpider do
+    let (event, trigger) ← newTriggerEvent (t := Spider) (a := String)
+    let windowed ← Event.windowM (Chronos.Duration.fromMilliseconds 30) event
+
+    let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List (Array String))
+    let _ ← SpiderM.liftIO <| windowed.subscribe fun arr =>
+      receivedRef.modify (· ++ [arr])
+
+    -- First window
+    SpiderM.liftIO <| trigger "a"
+    SpiderM.liftIO <| trigger "b"
+    SpiderM.liftIO <| IO.sleep 50
+
+    -- Second window
+    SpiderM.liftIO <| trigger "c"
+    SpiderM.liftIO <| IO.sleep 50
+
+    SpiderM.liftIO receivedRef.get
+  shouldBe result [#["a", "b"], #["c"]]
+
 test "Event.takeNM takes first n occurrences" := do
   let result ← runSpider do
     let (event, trigger) ← newTriggerEvent (t := Spider) (a := Nat)
