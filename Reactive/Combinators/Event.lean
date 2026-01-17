@@ -220,6 +220,33 @@ def fanEither [Timeline t] (ctx : TimelineCtx t) (e : Event t (Sum a b)) : IO (E
   let nodeIdR ← ctx.freshNodeId
   fanEitherWithId e nodeIdL nodeIdR
 
+/-- Split an event into two based on a predicate (with explicit NodeIds).
+    Returns (trueEvent, falseEvent) where trueEvent fires when predicate is true,
+    and falseEvent fires when predicate is false. -/
+def splitEWithId [Timeline t] (p : a → Bool) (e : Event t a) (nodeIdT : NodeId) (nodeIdF : NodeId)
+    : IO (Event t a × Event t a) := do
+  let trueEvent ← Event.newNodeWithId nodeIdT (e.height.inc)
+  let falseEvent ← Event.newNodeWithId nodeIdF (e.height.inc)
+  let _ ← Reactive.Event.subscribe e fun a =>
+    if p a then trueEvent.fire a else falseEvent.fire a
+  pure (trueEvent, falseEvent)
+
+/-- Split an event into two based on a predicate.
+    Returns (trueEvent, falseEvent) where trueEvent fires when predicate is true,
+    and falseEvent fires when predicate is false.
+    Requires TimelineCtx for type-safe timeline separation.
+
+    Example:
+    ```
+    let (evens, odds) ← Event.splitE ctx (· % 2 == 0) numbers
+    -- evens fires for even numbers, odds fires for odd numbers
+    ``` -/
+def splitE [Timeline t] (ctx : TimelineCtx t) (p : a → Bool) (e : Event t a)
+    : IO (Event t a × Event t a) := do
+  let nodeIdT ← ctx.freshNodeId
+  let nodeIdF ← ctx.freshNodeId
+  splitEWithId p e nodeIdT nodeIdF
+
 /-- Delay an event by one propagation frame (with explicit NodeId).
     Useful for breaking dependency cycles.
 

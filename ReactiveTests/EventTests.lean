@@ -402,6 +402,52 @@ test "Event.fanEitherM splits Sum event into two" := do
     pure (left, right)
   shouldBe result ([1, 2], ["hello", "world"])
 
+test "Event.splitEM splits event by predicate" := do
+  let result ← runSpider do
+    let (event, trigger) ← newTriggerEvent (t := Spider) (a := Nat)
+    let (evens, odds) ← Event.splitEM (· % 2 == 0) event
+
+    let evensRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
+    let oddsRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
+    let _ ← SpiderM.liftIO <| evens.subscribe fun n =>
+      evensRef.modify (· ++ [n])
+    let _ ← SpiderM.liftIO <| odds.subscribe fun n =>
+      oddsRef.modify (· ++ [n])
+
+    SpiderM.liftIO <| trigger 1
+    SpiderM.liftIO <| trigger 2
+    SpiderM.liftIO <| trigger 3
+    SpiderM.liftIO <| trigger 4
+    SpiderM.liftIO <| trigger 5
+
+    let evenVals ← SpiderM.liftIO evensRef.get
+    let oddVals ← SpiderM.liftIO oddsRef.get
+    pure (evenVals, oddVals)
+  shouldBe result ([2, 4], [1, 3, 5])
+
+test "Event.splitE with pure IO" := do
+  let result ← runSpider do
+    let ctx ← SpiderM.getTimelineCtx
+    let (event, trigger) ← newTriggerEvent (t := Spider) (a := String)
+    let (short, long) ← SpiderM.liftIO <| Event.splitE ctx (·.length < 4) event
+
+    let shortRef ← SpiderM.liftIO <| IO.mkRef ([] : List String)
+    let longRef ← SpiderM.liftIO <| IO.mkRef ([] : List String)
+    let _ ← SpiderM.liftIO <| short.subscribe fun s =>
+      shortRef.modify (· ++ [s])
+    let _ ← SpiderM.liftIO <| long.subscribe fun s =>
+      longRef.modify (· ++ [s])
+
+    SpiderM.liftIO <| trigger "hi"
+    SpiderM.liftIO <| trigger "hello"
+    SpiderM.liftIO <| trigger "yo"
+    SpiderM.liftIO <| trigger "world"
+
+    let shortVals ← SpiderM.liftIO shortRef.get
+    let longVals ← SpiderM.liftIO longRef.get
+    pure (shortVals, longVals)
+  shouldBe result (["hi", "yo"], ["hello", "world"])
+
 test "Event.fanM/selectM dispatches per key" := do
   let result ← runSpider do
     let (event, trigger) ← newTriggerEvent (t := Spider) (a := Std.HashMap Nat String)

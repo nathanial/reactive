@@ -906,6 +906,28 @@ def fanEitherM (e : Event Spider (Sum a b)) : SpiderM (Event Spider a × Event S
   env.decrementDepth
   pure (leftEvent, rightEvent)⟩
 
+/-- Split an event into two based on a predicate.
+    Returns (trueEvent, falseEvent) where trueEvent fires when predicate is true,
+    and falseEvent fires when predicate is false. -/
+def splitEM (p : a → Bool) (e : Event Spider a)
+    : SpiderM (Event Spider a × Event Spider a) := ⟨fun env => do
+  let _ ← env.incrementDepth "Event.splitEM"
+  let nodeIdT ← env.timelineCtx.freshNodeId
+  let nodeIdF ← env.timelineCtx.freshNodeId
+  let trueEvent ← Event.newNodeWithId nodeIdT (e.height.inc)
+  let falseEvent ← Event.newNodeWithId nodeIdF (e.height.inc)
+  let unsub ← Reactive.Event.subscribe e fun a =>
+    if p a then trueEvent.fire a else falseEvent.fire a
+  env.currentScope.register unsub
+  env.decrementDepth
+  pure (trueEvent, falseEvent)⟩
+
+/-- Split an event into two based on a predicate (fluent style).
+    Enables: `event.splitE' predicate` -/
+def splitE' (e : Event Spider a) (p : a → Bool)
+    : SpiderM (Event Spider a × Event Spider a) :=
+  splitEM p e
+
 /-- Delay an Event by one propagation frame, auto-allocating NodeId and registering with scope.
     Useful for breaking dependency cycles. -/
 def delayFrameM (e : Event Spider a) : SpiderM (Event Spider a) := ⟨fun env => do
