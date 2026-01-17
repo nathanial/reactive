@@ -33,6 +33,20 @@ def tag [Timeline t] (ctx : TimelineCtx t) (beh : Behavior t a) (e : Event t b) 
   let nodeId ← ctx.freshNodeId
   tagWithId beh e nodeId
 
+/-- Sample a behavior at event occurrence (alias for tagWithId).
+    Fires the sampled behavior value whenever the event fires.
+    The event value is discarded.
+
+    Example:
+    ```
+    let mousePos : Behavior Spider Position := ...
+    let clickEvent : Event Spider Unit := ...
+    let sampledPos ← Event.sample ctx mousePos clickEvent
+    -- sampledPos fires the current mouse position on each click
+    ``` -/
+abbrev sampleWithId := @tagWithId
+abbrev sample := @tag
+
 /-- Attach the current behavior value to each event occurrence (with explicit NodeId). -/
 def attachWithId [Timeline t] (b : Behavior t a) (e : Event t c) (nodeId : NodeId) : IO (Event t (a × c)) := do
   let derived ← Event.newNodeWithId nodeId (e.height.inc)
@@ -46,6 +60,19 @@ def attachWithId [Timeline t] (b : Behavior t a) (e : Event t c) (nodeId : NodeI
 def attach [Timeline t] (ctx : TimelineCtx t) (b : Behavior t a) (e : Event t c) : IO (Event t (a × c)) := do
   let nodeId ← ctx.freshNodeId
   attachWithId b e nodeId
+
+/-- Snapshot a behavior at event occurrence (alias for attachWithId).
+    Fires a pair of (behavior_value, event_value) on each occurrence.
+
+    Example:
+    ```
+    let counter : Behavior Spider Nat := ...
+    let clickEvent : Event Spider String := ...
+    let snapped ← Event.snapshot ctx counter clickEvent
+    -- snapped fires (counter_value, click_value) pairs
+    ``` -/
+abbrev snapshotWithId := @attachWithId
+abbrev snapshot := @attach
 
 /-- Attach with a combining function (with explicit NodeId). -/
 def attachWithFnId [Timeline t] (f : a → c → d) (b : Behavior t a) (e : Event t c)

@@ -780,6 +780,108 @@ test "Event.zipE with pure IO (diamond pattern)" := do
     SpiderM.liftIO receivedRef.get
   shouldBe result [(42, "test")]
 
+test "Event.sampleM is alias for tagM" := do
+  let result ← runSpider do
+    let counterRef ← SpiderM.liftIO <| IO.mkRef 0
+    let counterBehavior : Behavior Spider Nat := Behavior.fromSample do
+      counterRef.modify (· + 1)
+      counterRef.get
+    let (event, fire) ← newTriggerEvent (t := Spider) (a := Unit)
+    let sampled ← Event.sampleM counterBehavior event
+
+    let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
+    let _ ← SpiderM.liftIO <| sampled.subscribe fun v =>
+      receivedRef.modify (· ++ [v])
+
+    SpiderM.liftIO <| fire ()
+    SpiderM.liftIO <| fire ()
+    SpiderM.liftIO <| fire ()
+    SpiderM.liftIO receivedRef.get
+  shouldBe result [1, 2, 3]
+
+test "Event.snapshotM is alias for attachM" := do
+  let result ← runSpider do
+    let multiplier : Behavior Spider Nat := Behavior.constant 10
+    let (event, fire) ← newTriggerEvent (t := Spider) (a := String)
+    let snapped ← Event.snapshotM multiplier event
+
+    let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List (Nat × String))
+    let _ ← SpiderM.liftIO <| snapped.subscribe fun pair =>
+      receivedRef.modify (· ++ [pair])
+
+    SpiderM.liftIO <| fire "a"
+    SpiderM.liftIO <| fire "b"
+    SpiderM.liftIO receivedRef.get
+  shouldBe result [(10, "a"), (10, "b")]
+
+test "Event.sample is alias for tag (pure IO)" := do
+  let result ← runSpider do
+    let ctx ← SpiderM.getTimelineCtx
+    let counterRef ← SpiderM.liftIO <| IO.mkRef 0
+    let counterBehavior : Behavior Spider Nat := Behavior.fromSample do
+      counterRef.modify (· + 1)
+      counterRef.get
+    let (event, trigger) ← newTriggerEvent (t := Spider) (a := Unit)
+    let sampled ← SpiderM.liftIO <| Event.sample ctx counterBehavior event
+
+    let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
+    let _ ← SpiderM.liftIO <| sampled.subscribe fun n =>
+      receivedRef.modify (· ++ [n])
+
+    SpiderM.liftIO <| trigger ()
+    SpiderM.liftIO <| trigger ()
+    SpiderM.liftIO receivedRef.get
+  shouldBe result [1, 2]
+
+test "Event.snapshot is alias for attach (pure IO)" := do
+  let result ← runSpider do
+    let ctx ← SpiderM.getTimelineCtx
+    let (event, trigger) ← newTriggerEvent (t := Spider) (a := String)
+    let multiplier : Behavior Spider Nat := Behavior.constant 10
+    let snapped ← SpiderM.liftIO <| Event.snapshot ctx multiplier event
+
+    let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List (Nat × String))
+    let _ ← SpiderM.liftIO <| snapped.subscribe fun pair =>
+      receivedRef.modify (· ++ [pair])
+
+    SpiderM.liftIO <| trigger "x"
+    SpiderM.liftIO <| trigger "y"
+    SpiderM.liftIO receivedRef.get
+  shouldBe result [(10, "x"), (10, "y")]
+
+test "Event.sample' is fluent alias for tag'" := do
+  let result ← runSpider do
+    let counterRef ← SpiderM.liftIO <| IO.mkRef 0
+    let counterBehavior : Behavior Spider Nat := Behavior.fromSample do
+      counterRef.modify (· + 1)
+      counterRef.get
+    let (event, fire) ← newTriggerEvent (t := Spider) (a := Unit)
+    let sampled ← Event.sample' event counterBehavior
+
+    let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
+    let _ ← SpiderM.liftIO <| sampled.subscribe fun v =>
+      receivedRef.modify (· ++ [v])
+
+    SpiderM.liftIO <| fire ()
+    SpiderM.liftIO <| fire ()
+    SpiderM.liftIO receivedRef.get
+  shouldBe result [1, 2]
+
+test "Event.snapshot' is fluent alias for attach'" := do
+  let result ← runSpider do
+    let multiplier : Behavior Spider Nat := Behavior.constant 5
+    let (event, fire) ← newTriggerEvent (t := Spider) (a := Nat)
+    let snapped ← Event.snapshot' event multiplier
+
+    let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List (Nat × Nat))
+    let _ ← SpiderM.liftIO <| snapped.subscribe fun pair =>
+      receivedRef.modify (· ++ [pair])
+
+    SpiderM.liftIO <| fire 1
+    SpiderM.liftIO <| fire 2
+    SpiderM.liftIO receivedRef.get
+  shouldBe result [(5, 1), (5, 2)]
+
 #generate_tests
 
 end ReactiveTests.EventTests

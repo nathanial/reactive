@@ -764,6 +764,9 @@ def tagM (beh : Behavior Spider a) (e : Event Spider b) : SpiderM (Event Spider 
   env.decrementDepth
   pure derived⟩
 
+/-- Sample a behavior at event occurrence (SpiderM version, alias for tagM). -/
+abbrev sampleM := @tagM
+
 /-- Attach a Behavior's value to an Event, auto-allocating NodeId and registering with scope. -/
 def attachM (b : Behavior Spider a) (e : Event Spider c) : SpiderM (Event Spider (a × c)) := ⟨fun env => do
   let _ ← env.incrementDepth "Event.attachM"
@@ -775,6 +778,9 @@ def attachM (b : Behavior Spider a) (e : Event Spider c) : SpiderM (Event Spider
   env.currentScope.register unsub
   env.decrementDepth
   pure derived⟩
+
+/-- Snapshot a behavior at event occurrence (SpiderM version, alias for attachM). -/
+abbrev snapshotM := @attachM
 
 /-- Attach with a combining function, auto-allocating NodeId and registering with scope. -/
 def attachWithM (f : a → c → d) (b : Behavior Spider a) (e : Event Spider c)
@@ -1201,10 +1207,16 @@ def merge' (e1 : Event Spider a) (e2 : Event Spider a) : SpiderM (Event Spider a
 def tag' (e : Event Spider b) (beh : Behavior Spider a) : SpiderM (Event Spider a) :=
   tagM beh e
 
+/-- Sample a behavior at event occurrence (fluent style, alias for tag'). -/
+abbrev sample' := @tag'
+
 /-- Attach a Behavior's value (fluent style).
     Enables: `event.attach' behavior` -/
 def attach' (e : Event Spider c) (b : Behavior Spider a) : SpiderM (Event Spider (a × c)) :=
   attachM b e
+
+/-- Snapshot a behavior at event occurrence (fluent style, alias for attach'). -/
+abbrev snapshot' := @attach'
 
 /-- Attach with a combining function (fluent style).
     Enables: `event.attachWith' f behavior` -/
