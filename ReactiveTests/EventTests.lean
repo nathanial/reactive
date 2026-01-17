@@ -882,6 +882,71 @@ test "Event.snapshot' is fluent alias for attach'" := do
     SpiderM.liftIO receivedRef.get
   shouldBe result [(5, 1), (5, 2)]
 
+test "Event.differenceM fires when e1 fires but e2 doesn't" := do
+  let result ← runSpider do
+    let (e1, fire1) ← newTriggerEvent (t := Spider) (a := Nat)
+    let (e2, fire2) ← newTriggerEvent (t := Spider) (a := Unit)
+    let diff ← Event.differenceM e1 e2
+
+    let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
+    let _ ← SpiderM.liftIO <| diff.subscribe fun n =>
+      receivedRef.modify (· ++ [n])
+
+    SpiderM.liftIO <| fire1 1   -- e1 only → fires
+    SpiderM.liftIO <| fire1 2   -- e1 only → fires
+    SpiderM.liftIO receivedRef.get
+  shouldBe result [1, 2]
+
+test "Event.differenceM blocks when both events fire (diamond pattern)" := do
+  let result ← runSpider do
+    let (trigger, fire) ← newTriggerEvent (t := Spider) (a := Nat)
+    let e1 ← Event.mapM (· * 2) trigger
+    let e2 ← Event.mapM (fun _ => ()) trigger  -- always fires with trigger
+    let diff ← Event.differenceM e1 e2
+
+    let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
+    let _ ← SpiderM.liftIO <| diff.subscribe fun n =>
+      receivedRef.modify (· ++ [n])
+
+    SpiderM.liftIO <| fire 5  -- both e1 and e2 fire → blocked
+    SpiderM.liftIO <| fire 10 -- both fire → blocked
+    SpiderM.liftIO receivedRef.get
+  shouldBe result []
+
+test "Event.differenceM with conditional e2 (selective blocking)" := do
+  let result ← runSpider do
+    let (trigger, fire) ← newTriggerEvent (t := Spider) (a := Nat)
+    let e1 ← Event.mapM id trigger
+    let e2 ← Event.mapMaybeM (fun n => if n % 2 == 0 then some () else none) trigger
+    let diff ← Event.differenceM e1 e2
+
+    let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
+    let _ ← SpiderM.liftIO <| diff.subscribe fun n =>
+      receivedRef.modify (· ++ [n])
+
+    SpiderM.liftIO <| fire 1  -- odd: e1 fires, e2 doesn't → passes
+    SpiderM.liftIO <| fire 2  -- even: both fire → blocked
+    SpiderM.liftIO <| fire 3  -- odd: passes
+    SpiderM.liftIO <| fire 4  -- even: blocked
+    SpiderM.liftIO receivedRef.get
+  shouldBe result [1, 3]
+
+test "Event.difference with pure IO" := do
+  let result ← runSpider do
+    let ctx ← SpiderM.getTimelineCtx
+    let (e1, fire1) ← newTriggerEvent (t := Spider) (a := String)
+    let (e2, fire2) ← newTriggerEvent (t := Spider) (a := Unit)
+    let diff ← SpiderM.liftIO <| Event.difference ctx e1 e2
+
+    let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List String)
+    let _ ← SpiderM.liftIO <| diff.subscribe fun s =>
+      receivedRef.modify (· ++ [s])
+
+    SpiderM.liftIO <| fire1 "a"
+    SpiderM.liftIO <| fire1 "b"
+    SpiderM.liftIO receivedRef.get
+  shouldBe result ["a", "b"]
+
 #generate_tests
 
 end ReactiveTests.EventTests

@@ -1009,6 +1009,57 @@ def zipE' (e1 : Event Spider a) (e2 : Event Spider b)
     : SpiderM (Event Spider (a × b)) :=
   zipEM e1 e2
 
+/-- Fire when e1 occurs but e2 does not (in the same frame).
+    Auto-allocates NodeId and registers subscriptions with scope. -/
+def differenceM (e1 : Event Spider a) (e2 : Event Spider b)
+    : SpiderM (Event Spider a) := ⟨fun env => do
+  let _ ← env.incrementDepth "Event.differenceM"
+  let nodeId ← env.timelineCtx.freshNodeId
+  let height := Height.inc (max e1.height e2.height)
+  let derived ← Event.newNodeWithId nodeId height
+
+  let value1Ref ← IO.mkRef (none : Option a)
+  let value2FiredRef ← IO.mkRef false
+  let flushScheduledRef ← IO.mkRef false
+
+  let scheduleFlush : IO Unit := do
+    let alreadyScheduled ← flushScheduledRef.get
+    if !alreadyScheduled then
+      flushScheduledRef.set true
+      let flushAction : IO Unit := do
+        flushScheduledRef.set false
+        let v1opt ← value1Ref.get
+        let v2fired ← value2FiredRef.get
+        value1Ref.set none
+        value2FiredRef.set false
+        match v1opt with
+        | some v1 => if !v2fired then derived.fire v1 else pure ()
+        | none => pure ()
+      match ← getPropagationContext with
+      | some queue =>
+        if ← queue.isInFrame then
+          queue.insert ⟨derived.height, nodeId, flushAction⟩
+        else flushAction
+      | none => flushAction
+
+  let unsub1 ← Reactive.Event.subscribe e1 fun a => do
+    value1Ref.set (some a)
+    scheduleFlush
+  let unsub2 ← Reactive.Event.subscribe e2 fun _ => do
+    value2FiredRef.set true
+    scheduleFlush
+
+  env.currentScope.register unsub1
+  env.currentScope.register unsub2
+  env.decrementDepth
+  pure derived⟩
+
+/-- Fire when e1 occurs but e2 does not (fluent style).
+    Enables: `event1.difference' event2` -/
+def difference' (e1 : Event Spider a) (e2 : Event Spider b)
+    : SpiderM (Event Spider a) :=
+  differenceM e1 e2
+
 /-- Switch events based on a Dynamic selector.
     Fires from whichever event the Dynamic currently holds.
     All subscriptions are registered with the current scope. -/

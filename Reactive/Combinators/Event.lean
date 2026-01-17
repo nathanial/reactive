@@ -360,6 +360,62 @@ def zipE [Timeline t] (ctx : TimelineCtx t) (e1 : Event t a) (e2 : Event t b)
   let nodeId ← ctx.freshNodeId
   zipEWithId e1 e2 nodeId
 
+/-- Fire when e1 occurs but e2 does not (in the same frame).
+    Useful for "A but not B" patterns.
+
+    Example:
+    ```
+    let clicks : Event Spider Unit := ...
+    let drags : Event Spider Unit := ...
+    let clicksOnly ← Event.difference ctx clicks drags
+    -- clicksOnly fires only for clicks that aren't also drags
+    ``` -/
+def differenceWithId [Timeline t] (e1 : Event t a) (e2 : Event t b) (nodeId : NodeId)
+    : IO (Event t a) := do
+  let height := Height.inc (max e1.height e2.height)
+  let derived ← Event.newNodeWithId nodeId height
+
+  let value1Ref ← IO.mkRef (none : Option a)
+  let value2FiredRef ← IO.mkRef false
+  let flushScheduledRef ← IO.mkRef false
+
+  let scheduleFlush : IO Unit := do
+    let alreadyScheduled ← flushScheduledRef.get
+    if !alreadyScheduled then
+      flushScheduledRef.set true
+      let flushAction : IO Unit := do
+        flushScheduledRef.set false
+        let v1opt ← value1Ref.get
+        let v2fired ← value2FiredRef.get
+        value1Ref.set none
+        value2FiredRef.set false
+        match v1opt with
+        | some v1 => if !v2fired then derived.fire v1 else pure ()
+        | none => pure ()
+      match ← getPropagationContext with
+      | some queue =>
+        if ← queue.isInFrame then
+          queue.insert ⟨derived.height, nodeId, flushAction⟩
+        else flushAction
+      | none => flushAction
+
+  let _ ← Reactive.Event.subscribe e1 fun a => do
+    value1Ref.set (some a)
+    scheduleFlush
+
+  let _ ← Reactive.Event.subscribe e2 fun _ => do
+    value2FiredRef.set true
+    scheduleFlush
+
+  pure derived
+
+/-- Fire when e1 occurs but e2 does not (in the same frame).
+    Requires TimelineCtx for type-safe timeline separation. -/
+def difference [Timeline t] (ctx : TimelineCtx t) (e1 : Event t a) (e2 : Event t b)
+    : IO (Event t a) := do
+  let nodeId ← ctx.freshNodeId
+  differenceWithId e1 e2 nodeId
+
 end Event
 
 end Reactive
