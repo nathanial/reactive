@@ -948,6 +948,61 @@ def accumulateM (f : a → b → b) (initial : b) (e : Event Spider a)
 /-- Alias for accumulateM (familiar name from other FRP libraries). -/
 abbrev scanM := @accumulateM
 
+/-- Combine two Events that fire simultaneously, auto-allocating NodeId
+    and registering with scope.
+    If both events fire in the same frame, fires once with paired values.
+    If only one fires, nothing is emitted for that occurrence. -/
+def zipEM (e1 : Event Spider a) (e2 : Event Spider b)
+    : SpiderM (Event Spider (a × b)) := ⟨fun env => do
+  let _ ← env.incrementDepth "Event.zipEM"
+  let nodeId ← env.timelineCtx.freshNodeId
+  let height := Height.inc (max e1.height e2.height)
+  let derived ← Event.newNodeWithId nodeId height
+
+  let value1Ref ← IO.mkRef (none : Option a)
+  let value2Ref ← IO.mkRef (none : Option b)
+  let flushScheduledRef ← IO.mkRef false
+
+  let scheduleFlush : IO Unit := do
+    let alreadyScheduled ← flushScheduledRef.get
+    if !alreadyScheduled then
+      flushScheduledRef.set true
+      let flushAction : IO Unit := do
+        flushScheduledRef.set false
+        let v1opt ← value1Ref.get
+        let v2opt ← value2Ref.get
+        -- Always clear values after checking - values only valid within same frame
+        value1Ref.set none
+        value2Ref.set none
+        match (v1opt, v2opt) with
+        | (some v1, some v2) => derived.fire (v1, v2)
+        | _ => pure ()
+      match ← getPropagationContext with
+      | some queue =>
+        if ← queue.isInFrame then
+          let pending : PendingFire := ⟨derived.height, nodeId, flushAction⟩
+          queue.insert pending
+        else flushAction
+      | none => flushAction
+
+  let unsub1 ← Reactive.Event.subscribe e1 fun a => do
+    value1Ref.set (some a)
+    scheduleFlush
+  let unsub2 ← Reactive.Event.subscribe e2 fun b => do
+    value2Ref.set (some b)
+    scheduleFlush
+
+  env.currentScope.register unsub1
+  env.currentScope.register unsub2
+  env.decrementDepth
+  pure derived⟩
+
+/-- Combine two Events that fire simultaneously (fluent style).
+    Enables: `event1.zipE' event2` -/
+def zipE' (e1 : Event Spider a) (e2 : Event Spider b)
+    : SpiderM (Event Spider (a × b)) :=
+  zipEM e1 e2
+
 /-- Switch events based on a Dynamic selector.
     Fires from whichever event the Dynamic currently holds.
     All subscriptions are registered with the current scope. -/

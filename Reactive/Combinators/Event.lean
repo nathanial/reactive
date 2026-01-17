@@ -282,6 +282,57 @@ def accumulate [Timeline t] (ctx : TimelineCtx t) (f : a → b → b) (initial :
     Like foldDyn but returns an Event instead of a Dynamic. -/
 abbrev scan := @accumulate
 
+/-- Combine two events that fire simultaneously (with explicit NodeId).
+    If both events fire in the same frame, fires once with paired values.
+    If only one fires, nothing is emitted for that occurrence. -/
+def zipEWithId [Timeline t] (e1 : Event t a) (e2 : Event t b) (nodeId : NodeId)
+    : IO (Event t (a × b)) := do
+  let height := Height.inc (max e1.height e2.height)
+  let derived ← Event.newNodeWithId nodeId height
+
+  let value1Ref ← IO.mkRef (none : Option a)
+  let value2Ref ← IO.mkRef (none : Option b)
+  let flushScheduledRef ← IO.mkRef false
+
+  let scheduleFlush : IO Unit := do
+    let alreadyScheduled ← flushScheduledRef.get
+    if !alreadyScheduled then
+      flushScheduledRef.set true
+      let flushAction : IO Unit := do
+        flushScheduledRef.set false
+        let v1opt ← value1Ref.get
+        let v2opt ← value2Ref.get
+        -- Always clear values after checking - values only valid within same frame
+        value1Ref.set none
+        value2Ref.set none
+        match (v1opt, v2opt) with
+        | (some v1, some v2) => derived.fire (v1, v2)
+        | _ => pure ()
+      match ← getPropagationContext with
+      | some queue =>
+        if ← queue.isInFrame then
+          let pending : PendingFire := ⟨derived.height, nodeId, flushAction⟩
+          queue.insert pending
+        else flushAction
+      | none => flushAction
+
+  let _ ← Reactive.Event.subscribe e1 fun a => do
+    value1Ref.set (some a)
+    scheduleFlush
+
+  let _ ← Reactive.Event.subscribe e2 fun b => do
+    value2Ref.set (some b)
+    scheduleFlush
+
+  pure derived
+
+/-- Combine two events that fire simultaneously.
+    Requires TimelineCtx for type-safe timeline separation. -/
+def zipE [Timeline t] (ctx : TimelineCtx t) (e1 : Event t a) (e2 : Event t b)
+    : IO (Event t (a × b)) := do
+  let nodeId ← ctx.freshNodeId
+  zipEWithId e1 e2 nodeId
+
 end Event
 
 end Reactive

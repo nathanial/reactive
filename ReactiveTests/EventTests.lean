@@ -710,6 +710,76 @@ test "Event.mapConst' maps all values to constant (fluent style)" := do
     SpiderM.liftIO receivedRef.get
   shouldBe result [100, 100]
 
+test "Event.zipEM pairs simultaneous events (diamond pattern)" := do
+  let result ← runSpider do
+    -- Use diamond pattern: single source, two derived events
+    let (trigger, fire) ← newTriggerEvent (t := Spider) (a := Nat)
+    let e1 ← Event.mapM (· * 2) trigger      -- produces Nat
+    let e2 ← Event.mapM (toString ·) trigger  -- produces String
+    let zipped ← Event.zipEM e1 e2
+
+    let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List (Nat × String))
+    let _ ← SpiderM.liftIO <| zipped.subscribe fun pair =>
+      receivedRef.modify (· ++ [pair])
+
+    SpiderM.liftIO <| fire 5
+    SpiderM.liftIO receivedRef.get
+  -- e1 produces 10, e2 produces "5" - both fire simultaneously from same source
+  shouldBe result [(10, "5")]
+
+test "Event.zipEM ignores non-simultaneous events" := do
+  let result ← runSpider do
+    let (e1, fire1) ← newTriggerEvent (t := Spider) (a := Nat)
+    let (e2, fire2) ← newTriggerEvent (t := Spider) (a := String)
+    let zipped ← Event.zipEM e1 e2
+
+    let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List (Nat × String))
+    let _ ← SpiderM.liftIO <| zipped.subscribe fun pair =>
+      receivedRef.modify (· ++ [pair])
+
+    -- Fire separately (different frames)
+    SpiderM.liftIO <| fire1 10
+    SpiderM.liftIO <| fire2 "hello"
+
+    SpiderM.liftIO receivedRef.get
+  shouldBe result []
+
+test "Event.zipEM handles multiple simultaneous pairs" := do
+  let result ← runSpider do
+    -- Use diamond pattern
+    let (trigger, fire) ← newTriggerEvent (t := Spider) (a := Nat)
+    let e1 ← Event.mapM id trigger
+    let e2 ← Event.mapM (fun n => String.mk (List.replicate n 'x')) trigger
+    let zipped ← Event.zipEM e1 e2
+
+    let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List (Nat × String))
+    let _ ← SpiderM.liftIO <| zipped.subscribe fun pair =>
+      receivedRef.modify (· ++ [pair])
+
+    -- Fire twice, each creating a simultaneous pair
+    SpiderM.liftIO <| fire 1  -- produces (1, "x")
+    SpiderM.liftIO <| fire 2  -- produces (2, "xx")
+
+    SpiderM.liftIO receivedRef.get
+  shouldBe result [(1, "x"), (2, "xx")]
+
+test "Event.zipE with pure IO (diamond pattern)" := do
+  let result ← runSpider do
+    let ctx ← SpiderM.getTimelineCtx
+    let (trigger, fire) ← newTriggerEvent (t := Spider) (a := Nat)
+    let e1 ← Event.mapM (· + 40) trigger
+    let e2 ← Event.mapM (fun _ => "test") trigger
+    let zipped ← SpiderM.liftIO <| Event.zipE ctx e1 e2
+
+    let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List (Nat × String))
+    let _ ← SpiderM.liftIO <| zipped.subscribe fun pair =>
+      receivedRef.modify (· ++ [pair])
+
+    SpiderM.liftIO <| fire 2  -- produces (42, "test")
+
+    SpiderM.liftIO receivedRef.get
+  shouldBe result [(42, "test")]
+
 #generate_tests
 
 end ReactiveTests.EventTests
