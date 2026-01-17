@@ -268,6 +268,17 @@ def takeN [Timeline t] (ctx : TimelineCtx t) (n : Nat) (e : Event t a) : IO (Eve
   let nodeId ← ctx.freshNodeId
   takeNWithId n e nodeId
 
+/-- Take only the first occurrence of an event (with explicit NodeId).
+    Specialization of `takeNWithId 1` for convenience. -/
+abbrev onceWithId [Timeline t] (e : Event t a) (nodeId : NodeId) : IO (Event t a) :=
+  takeNWithId 1 e nodeId
+
+/-- Take only the first occurrence of an event.
+    Specialization of `takeN 1` for convenience.
+    Requires TimelineCtx for type-safe timeline separation. -/
+abbrev once [Timeline t] (ctx : TimelineCtx t) (e : Event t a) : IO (Event t a) :=
+  takeN ctx 1 e
+
 /-- Drop the first n occurrences (with explicit NodeId). -/
 def dropNWithId [Timeline t] (n : Nat) (e : Event t a) (nodeId : NodeId) : IO (Event t a) := do
   let countRef ← IO.mkRef 0

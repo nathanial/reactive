@@ -173,6 +173,37 @@ test "Event.takeNM takes first n occurrences" := do
     SpiderM.liftIO receivedRef.get
   shouldBe result [1, 2, 3]
 
+test "Event.onceM takes only first occurrence" := do
+  let result ← runSpider do
+    let (event, trigger) ← newTriggerEvent (t := Spider) (a := Nat)
+    let first ← Event.onceM event
+
+    let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
+    let _ ← SpiderM.liftIO <| first.subscribe fun n =>
+      receivedRef.modify (· ++ [n])
+
+    SpiderM.liftIO <| trigger 1
+    SpiderM.liftIO <| trigger 2
+    SpiderM.liftIO <| trigger 3
+    SpiderM.liftIO receivedRef.get
+  shouldBe result [1]
+
+test "Event.once with pure IO" := do
+  let result ← runSpider do
+    let ctx ← SpiderM.getTimelineCtx
+    let (event, trigger) ← newTriggerEvent (t := Spider) (a := String)
+    let first ← SpiderM.liftIO <| Event.once ctx event
+
+    let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List String)
+    let _ ← SpiderM.liftIO <| first.subscribe fun s =>
+      receivedRef.modify (· ++ [s])
+
+    SpiderM.liftIO <| trigger "first"
+    SpiderM.liftIO <| trigger "second"
+    SpiderM.liftIO <| trigger "third"
+    SpiderM.liftIO receivedRef.get
+  shouldBe result ["first"]
+
 test "Event.dropNM drops first n occurrences" := do
   let result ← runSpider do
     let (event, trigger) ← newTriggerEvent (t := Spider) (a := Nat)

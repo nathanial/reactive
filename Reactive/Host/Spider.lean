@@ -924,6 +924,16 @@ def takeNM (n : Nat) (e : Event Spider a) : SpiderM (Event Spider a) := ⟨fun e
   env.currentScope.register unsub
   pure derived⟩
 
+/-- Take only the first occurrence of an event.
+    Specialization of `takeNM 1` for convenience. -/
+abbrev onceM (e : Event Spider a) : SpiderM (Event Spider a) :=
+  takeNM 1 e
+
+/-- Take only the first occurrence of an event (fluent style).
+    Enables: `event.once'` -/
+abbrev once' (e : Event Spider a) : SpiderM (Event Spider a) :=
+  onceM e
+
 /-- Drop the first n occurrences from an Event, auto-allocating NodeId and registering with scope. -/
 def dropNM (n : Nat) (e : Event Spider a) : SpiderM (Event Spider a) := ⟨fun env => do
   let nodeId ← env.timelineCtx.freshNodeId
