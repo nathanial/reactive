@@ -59,31 +59,6 @@ test "runWithReplaceM replacement can use FRP combinators" := do
   -- Replacement: returns 10
   shouldBe result [5, 10]
 
-test "traverseWithAdjustM maps over list" := do
-  let result ← runSpider do
-    let f : Nat → SpiderM Nat := fun n => pure (n * 2)
-    let (results, _) ← SpiderM.traverseWithAdjustM f [1, 2, 3]
-    pure results
-  shouldBe result [2, 4, 6]
-
-test "traverseWithAdjustM with empty list" := do
-  let result ← runSpider do
-    let f : Nat → SpiderM Nat := fun n => pure (n * 2)
-    let (results, _) ← SpiderM.traverseWithAdjustM f ([] : List Nat)
-    pure results
-  shouldBe result []
-
-test "traverseWithAdjustM with effectful computation" := do
-  let result ← runSpider do
-    let counterRef ← SpiderM.liftIO <| IO.mkRef 0
-    let f : Nat → SpiderM Nat := fun n => do
-      let count ← SpiderM.liftIO <| counterRef.modifyGet fun c => (c, c + 1)
-      pure (n + count)
-    let (results, _) ← SpiderM.traverseWithAdjustM f [10, 20, 30]
-    pure results
-  -- 10 + 0, 20 + 1, 30 + 2
-  shouldBe result [10, 21, 32]
-
 test "runWithReplaceRequester basic" := do
   let result ← runSpider do
     let (replaceEvent, triggerReplace) ← newTriggerEvent (t := Spider) (a := SpiderM Nat)

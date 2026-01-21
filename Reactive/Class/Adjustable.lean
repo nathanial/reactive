@@ -12,7 +12,6 @@ namespace Reactive
 
     This is an advanced FRP capability that enables:
     - Switching between different reactive networks dynamically
-    - Incremental computation where only affected parts recompute
     - Higher-order FRP patterns
 
     Based on Reflex's Adjustable typeclass design. -/
@@ -24,10 +23,6 @@ class Adjustable (t : Type) (m : Type → Type) extends MonadHold t m where
       is executed and its result is fired on the returned event. -/
   runWithReplace : m a → Event t (m a) → m (a × Event t a)
 
-  /-- Traverse a list with monadic computation.
-      Returns initial results and an event for future updates. -/
-  traverseWithAdjust : (a → m b) → List a → m (List b × Event t (List b))
-
-export Adjustable (runWithReplace traverseWithAdjust)
+export Adjustable (runWithReplace)
 
 end Reactive

@@ -137,20 +137,19 @@ This prevents glitches where derived nodes would see inconsistent intermediate s
 
 Implemented the `Adjustable` typeclass enabling higher-order FRP patterns:
 - Updated signature to match Reflex design: replacement event is a parameter, not produced by the computation
-- Added `Adjustable Spider SpiderM` instance with `runWithReplace` and `traverseWithAdjust`
-- Added convenience functions `runWithReplaceM` and `traverseWithAdjustM` to avoid universe polymorphism issues
+- Added `Adjustable Spider SpiderM` instance with `runWithReplace`
+- Added convenience function `runWithReplaceM` to avoid universe polymorphism issues
 - Added `runWithReplaceRequester` for computations that produce their own replacement event
 - Added `traverseDynList` for traversing dynamic lists with automatic rebuilding on changes
 
 **Key Design Decisions:**
 - `runWithReplace : m a → Event t (m a) → m (a × Event t a)` - takes replacement event as input (practical) rather than having computation produce it
 - Old subscriptions are not explicitly cleaned up (rely on GC)
-- `traverseWithAdjust` returns never-firing update event (full incremental updates would require more infrastructure)
 
 **Files Modified:**
 - `Reactive/Class/Adjustable.lean` (updated signature)
 - `Reactive/Host/Spider.lean` (Adjustable instance + helpers)
-- `ReactiveTests/AdjustableTests.lean` (new test file with 8 tests)
+- `ReactiveTests/AdjustableTests.lean` (new test file with 5 tests)
 - `ReactiveTests/Main.lean` (import AdjustableTests)
 
 ### [DONE] Scope-Based Subscription Management

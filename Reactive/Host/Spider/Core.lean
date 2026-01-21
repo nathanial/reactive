@@ -333,16 +333,6 @@ instance : Adjustable Spider SpiderM where
     pure (initialResult, resultEvent)
   ⟩
 
-  traverseWithAdjust f inputs := ⟨fun env => do
-    -- Run all computations over the input list
-    let results ← inputs.mapM fun a => (f a).run env
-
-    -- For a minimal implementation, return a never-firing update event
-    -- A full implementation would track per-item replacement events
-    let neverEvent ← Event.never env.timelineCtx
-    pure (results, neverEvent)
-  ⟩
-
 /-- Convenience function for runWithReplace with explicit types.
     Direct implementation to avoid universe inference issues.
     Subscription is registered with current scope. -/
@@ -355,15 +345,6 @@ def runWithReplaceM (initial : SpiderM a) (replaceEvent : Event Spider (SpiderM 
     fireResult result
   env.currentScope.register unsub
   pure (initialResult, resultEvent)
-⟩
-
-/-- Convenience function for traverseWithAdjust with explicit types.
-    Direct implementation to avoid universe inference issues. -/
-def traverseWithAdjustM (f : a → SpiderM b) (inputs : List a)
-    : SpiderM (List b × Event Spider (List b)) := ⟨fun env => do
-  let results ← inputs.mapM fun x => (f x).run env
-  let neverEvent ← Event.never env.timelineCtx
-  pure (results, neverEvent)
 ⟩
 
 /-! ## Recursive Binding Combinators
