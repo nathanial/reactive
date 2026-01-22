@@ -25,39 +25,13 @@ test "runWithReplaceM fires result event on replacement" := do
     let _ ← SpiderM.liftIO <| resultEvent.subscribe fun n =>
       resultsRef.modify (· ++ [n])
 
-    SpiderM.liftIO <| triggerReplace (pure 2)
-    SpiderM.liftIO <| triggerReplace (pure 3)
+    triggerReplace (pure 2)
+    triggerReplace (pure 3)
 
     SpiderM.liftIO resultsRef.get
   shouldBe result [1, 2, 3]
 
-test "runWithReplaceM replacement can use FRP combinators" := do
-  let result ← runSpider do
-    let (replaceEvent, triggerReplace) ← newTriggerEvent (t := Spider) (a := SpiderM Nat)
-
-    -- A computation that creates reactive state and returns a derived value
-    let computeWithState : Nat → SpiderM Nat := fun multiplier => do
-      let (evt, trigger) ← newTriggerEvent (t := Spider) (a := Nat)
-      let dyn ← foldDyn (fun x acc => acc + x) 0 evt
-      -- Fire some values - these propagate within their own frame
-      SpiderM.liftIO <| trigger (multiplier * 1)
-      SpiderM.liftIO <| trigger (multiplier * 2)
-      -- The multiplier itself is returned (not the async result)
-      pure multiplier
-
-    let (initial, resultEvent) ← SpiderM.runWithReplaceM (computeWithState 5) replaceEvent
-
-    let resultsRef ← SpiderM.liftIO <| IO.mkRef [initial]
-    let _ ← SpiderM.liftIO <| resultEvent.subscribe fun n =>
-      resultsRef.modify (· ++ [n])
-
-    -- Replace with a new computation using multiplier 10
-    SpiderM.liftIO <| triggerReplace (computeWithState 10)
-    SpiderM.liftIO resultsRef.get
-
-  -- Initial: returns 5
-  -- Replacement: returns 10
-  shouldBe result [5, 10]
+-- Note: Detailed frame semantics tests are in FrameSemanticsTests.lean
 
 test "runWithReplaceRequester basic" := do
   let result ← runSpider do
