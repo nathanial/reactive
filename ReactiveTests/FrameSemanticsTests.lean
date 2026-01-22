@@ -277,18 +277,25 @@ test "same code behaves differently inside vs outside frame" := do
   shouldBe result (42, 0)
 
 /-!
-## Test: FRP Infrastructure Created in Frames Works After Frame Ends
+## Test: Replacement Tears Down Old Network, New Network Works
 
-This test verifies that while you can't observe synchronous propagation inside
-a frame, the FRP infrastructure IS correctly wired up and works normally after
-the frame completes.
+This test verifies two important properties:
+
+1. **Old network disposal**: When a replacement fires, the old computation's
+   subscriptions are disposed. The old network no longer receives events.
+
+2. **New network works**: The replacement computation's FRP infrastructure
+   is correctly wired up and works normally after the frame completes.
+
+This is the correct Reflex-style replacement semantic: the old network is
+torn down, not left running alongside the new one.
 -/
-test "FRP infrastructure works after frame completes" := do
+test "replacement tears down old network, new network works" := do
   let result ← runSpider do
-    -- External event we'll use to test the dynamics after frame ends
+    -- External event we'll use to test which dynamics are still active
     let (externalEvent, fireExternal) ← newTriggerEvent (t := Spider) (a := Nat)
 
-    -- Track values from dynamics created inside replacements
+    -- Track values from ALL dynamics (to verify old one is disposed)
     let valuesRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
 
     let (replaceEvent, triggerReplace) ← newTriggerEvent (t := Spider) (a := SpiderM Nat)
@@ -296,28 +303,157 @@ test "FRP infrastructure works after frame completes" := do
     -- Computation that creates a dynamic subscribing to the external event
     let createDynamicForExternal : Nat → SpiderM Nat := fun initialValue => do
       let dyn ← foldDyn (fun x acc => acc + x) initialValue externalEvent
-      -- Subscribe to observe updates
+      -- Subscribe to observe updates (this subscription will be disposed on replacement)
       let _ ← SpiderM.liftIO <| dyn.updated.subscribe fun val =>
         valuesRef.modify (· ++ [val])
       pure initialValue
 
     let (initial, _) ← SpiderM.runWithReplaceM (createDynamicForExternal 100) replaceEvent
 
-    -- Trigger replacement - creates another dynamic with initial value 200
+    -- Trigger replacement - OLD network (100) is DISPOSED, new one (200) created
     triggerReplace (createDynamicForExternal 200)
 
-    -- NOW fire external event - both dynamics should receive it and accumulate
+    -- Fire external event - ONLY the replacement dynamic should receive it
+    -- The initial dynamic's subscription was disposed when replacement fired
     fireExternal 50
 
     let values ← SpiderM.liftIO valuesRef.get
     pure (initial, values)
 
-  -- initial = 100 (returned directly)
+  -- initial = 100 (returned directly from initial computation)
+  --
+  -- After replacement:
+  --   First dynamic (100): DISPOSED - its subscription no longer fires
+  --   Second dynamic (200): ACTIVE - will receive events
+  --
   -- After fireExternal 50:
-  --   First dynamic: 100 + 50 = 150
-  --   Second dynamic: 200 + 50 = 250
-  -- values = [150, 250]
-  shouldBe result (100, [150, 250])
+  --   Only second dynamic receives it: 200 + 50 = 250
+  --
+  -- values = [250] (NOT [150, 250] - the old network was torn down!)
+  shouldBe result (100, [250])
+
+/-!
+## Test: Full Replacement Lifecycle
+
+This test exercises the complete replacement lifecycle with multiple replacements,
+verifying at each stage that:
+1. The current network receives events correctly
+2. After replacement, the old network is disposed (no longer receives events)
+3. The new network takes over and works correctly
+
+We create a sequence: initial → replacement1 → replacement2, firing events
+at each stage to verify proper disposal and handoff.
+-/
+test "full replacement lifecycle with multiple replacements" := do
+  let result ← runSpider do
+    -- External event that all networks will subscribe to
+    let (externalEvent, fireExternal) ← newTriggerEvent (t := Spider) (a := Nat)
+
+    -- Track ALL values received by ALL networks (with labels for debugging)
+    let logRef ← SpiderM.liftIO <| IO.mkRef ([] : List (String × Nat))
+
+    let (replaceEvent, triggerReplace) ← newTriggerEvent (t := Spider) (a := SpiderM String)
+
+    -- Factory that creates a labeled network
+    let createNetwork : String → Nat → SpiderM String := fun label initialValue => do
+      let dyn ← foldDyn (fun x acc => acc + x) initialValue externalEvent
+      -- Subscribe to log all updates with this network's label
+      let _ ← SpiderM.liftIO <| dyn.updated.subscribe fun val =>
+        logRef.modify (· ++ [(label, val)])
+      pure label
+
+    -- === PHASE 1: Initial network "A" with initial value 100 ===
+    let (initialLabel, _) ← SpiderM.runWithReplaceM (createNetwork "A" 100) replaceEvent
+
+    -- Fire some events - network A should receive them
+    fireExternal 10  -- A: 100 + 10 = 110
+    fireExternal 20  -- A: 110 + 20 = 130
+
+    -- === PHASE 2: Replace with network "B" (initial value 200) ===
+    -- Network A should be disposed after this
+    triggerReplace (createNetwork "B" 200)
+
+    -- Fire events - ONLY network B should receive them (A is disposed)
+    fireExternal 5   -- B: 200 + 5 = 205
+    fireExternal 15  -- B: 205 + 15 = 220
+
+    -- === PHASE 3: Replace with network "C" (initial value 300) ===
+    -- Network B should be disposed after this
+    triggerReplace (createNetwork "C" 300)
+
+    -- Fire events - ONLY network C should receive them (A and B are disposed)
+    fireExternal 1   -- C: 300 + 1 = 301
+    fireExternal 2   -- C: 301 + 2 = 303
+    fireExternal 3   -- C: 303 + 3 = 306
+
+    let log ← SpiderM.liftIO logRef.get
+    pure (initialLabel, log)
+
+  -- Verify the complete event log:
+  -- Phase 1: A receives events at 110, 130
+  -- Phase 2: Only B receives events at 205, 220 (A is gone)
+  -- Phase 3: Only C receives events at 301, 303, 306 (A and B are gone)
+  let expectedLog := [
+    ("A", 110), ("A", 130),           -- Phase 1: A active
+    ("B", 205), ("B", 220),           -- Phase 2: B active, A disposed
+    ("C", 301), ("C", 303), ("C", 306) -- Phase 3: C active, B disposed
+  ]
+  shouldBe result ("A", expectedLog)
+
+/-!
+## Test: Replacement Disposes Nested Infrastructure
+
+This test verifies that replacement properly disposes deeply nested FRP
+infrastructure, not just top-level subscriptions. The initial network creates
+multiple interconnected dynamics and events; all should be cleaned up on
+replacement.
+-/
+test "replacement disposes nested infrastructure" := do
+  let result ← runSpider do
+    let (externalEvent, fireExternal) ← newTriggerEvent (t := Spider) (a := Nat)
+    let logRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
+
+    let (replaceEvent, triggerReplace) ← newTriggerEvent (t := Spider) (a := SpiderM Nat)
+
+    -- Create a network with nested/chained dynamics
+    let createComplexNetwork : Nat → SpiderM Nat := fun multiplier => do
+      -- First dynamic: accumulates raw values
+      let dyn1 ← foldDyn (fun (x : Nat) (acc : Nat) => acc + x) 0 externalEvent
+
+      -- Second dynamic: derived from first, applies multiplier
+      let derived : Event Spider Nat ← Event.mapM (fun (v : Nat) => v * multiplier) dyn1.updated
+      let dyn2 ← foldDyn (fun (x : Nat) (acc : Nat) => acc + x) 0 derived
+
+      -- Subscribe to the derived dynamic's updates
+      let _ ← SpiderM.liftIO <| dyn2.updated.subscribe fun val =>
+        logRef.modify (· ++ [val])
+
+      pure multiplier
+
+    -- Initial network with multiplier 2
+    let (initial, _) ← SpiderM.runWithReplaceM (createComplexNetwork 2) replaceEvent
+
+    -- Fire events - derived values are multiplied by 2
+    fireExternal 10  -- dyn1: 10, dyn2: 10*2 = 20
+    fireExternal 20  -- dyn1: 30, dyn2: 20 + 30*2 = 80 (wait, that's not right...)
+
+    -- Actually: dyn1.updated fires with NEW accumulated value
+    -- So: fire 10 -> dyn1 becomes 10, dyn1.updated fires 10, derived fires 20, dyn2 becomes 20
+    --     fire 20 -> dyn1 becomes 30, dyn1.updated fires 30, derived fires 60, dyn2 becomes 80
+
+    -- Replace with multiplier 10 - old network (including dyn1, dyn2, derived) disposed
+    triggerReplace (createComplexNetwork 10)
+
+    -- Fire events - new network uses multiplier 10
+    fireExternal 5   -- dyn1: 5, derived: 50, dyn2: 50
+
+    let log ← SpiderM.liftIO logRef.get
+    pure (initial, log)
+
+  -- Old network: 20, 80 (multiplier 2)
+  -- New network: 50 (multiplier 10)
+  -- Old network's subscription is disposed, so we don't see its values after replacement
+  shouldBe result (2, [20, 80, 50])
 
 #generate_tests
 

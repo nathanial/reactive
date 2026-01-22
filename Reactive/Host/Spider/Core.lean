@@ -318,15 +318,29 @@ instance : PostBuild Spider SpiderM where
 
 instance : Adjustable Spider SpiderM where
   runWithReplace initial replaceEvent := ⟨fun env => do
-    -- Run the initial computation
-    let initialResult ← initial.run env
+    -- Create a child scope for the current computation (will be disposed on replacement)
+    let currentChildScope ← IO.mkRef (← env.currentScope.child)
+
+    -- Run the initial computation in its own child scope
+    let initialResult ← do
+      let childScope ← currentChildScope.get
+      let childEnv := { env with currentScope := childScope }
+      initial.run childEnv
 
     -- Create result event for replacement outputs
     let (resultEvent, fireResult) ← Event.newTrigger env.timelineCtx
 
-    -- Subscribe to replacement events - when fired, run the new computation
+    -- Subscribe to replacement events - when fired, tear down old network and run new
     let unsub ← Reactive.Event.subscribe replaceEvent fun replacementM => do
-      let result ← replacementM.run env
+      -- Dispose the old computation's scope (tears down its subscriptions)
+      let oldScope ← currentChildScope.get
+      oldScope.dispose
+      -- Create a new child scope for the replacement
+      let newScope ← env.currentScope.child
+      currentChildScope.set newScope
+      -- Run replacement in the new scope
+      let childEnv := { env with currentScope := newScope }
+      let result ← replacementM.run childEnv
       fireResult result
     env.currentScope.register unsub
 
@@ -335,15 +349,38 @@ instance : Adjustable Spider SpiderM where
 
 /-- Convenience function for runWithReplace with explicit types.
     Direct implementation to avoid universe inference issues.
-    Subscription is registered with current scope. -/
+    Subscription is registered with current scope.
+
+    **Replacement semantics**: When the replacement event fires, the old
+    computation's subscriptions are disposed before running the new one.
+    This ensures clean teardown of replaced FRP networks. -/
 def runWithReplaceM (initial : SpiderM a) (replaceEvent : Event Spider (SpiderM a))
     : SpiderM (a × Event Spider a) := ⟨fun env => do
-  let initialResult ← initial.run env
+  -- Create a child scope for the current computation (will be disposed on replacement)
+  let currentChildScope ← IO.mkRef (← env.currentScope.child)
+
+  -- Run the initial computation in its own child scope
+  let initialResult ← do
+    let childScope ← currentChildScope.get
+    let childEnv := { env with currentScope := childScope }
+    initial.run childEnv
+
   let (resultEvent, fireResult) ← Event.newTrigger env.timelineCtx
+
+  -- Subscribe to replacement events - when fired, tear down old network and run new
   let unsub ← Reactive.Event.subscribe replaceEvent fun replacementM => do
-    let result ← replacementM.run env
+    -- Dispose the old computation's scope (tears down its subscriptions)
+    let oldScope ← currentChildScope.get
+    oldScope.dispose
+    -- Create a new child scope for the replacement
+    let newScope ← env.currentScope.child
+    currentChildScope.set newScope
+    -- Run replacement in the new scope
+    let childEnv := { env with currentScope := newScope }
+    let result ← replacementM.run childEnv
     fireResult result
   env.currentScope.register unsub
+
   pure (initialResult, resultEvent)
 ⟩
 
