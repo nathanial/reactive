@@ -297,6 +297,5 @@ test "Behavior.join is alias for switch" := do
   let value ← joined.sample
   shouldBe value "hello"
 
-#generate_tests
 
 end ReactiveTests.BehaviorTests

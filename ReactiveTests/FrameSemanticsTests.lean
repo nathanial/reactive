@@ -455,6 +455,5 @@ test "replacement disposes nested infrastructure" := do
   -- Old network's subscription is disposed, so we don't see its values after replacement
   shouldBe result (2, [20, 80, 50])
 
-#generate_tests
 
 end ReactiveTests.FrameSemanticsTests

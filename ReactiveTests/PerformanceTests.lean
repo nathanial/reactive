@@ -911,6 +911,5 @@ test "micro: IO.Ref.modify vs direct callback" := do
 
   IO.println s!"  [direct: {elapsed1}, with IO.Ref ops: {elapsed2}]"
 
-#generate_tests
 
 end ReactiveTests.PerformanceTests

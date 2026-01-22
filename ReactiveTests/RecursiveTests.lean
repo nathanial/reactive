@@ -99,6 +99,5 @@ test "fixDynM with initial value check" := do
 
   shouldBe result 42
 
-#generate_tests
 
 end ReactiveTests.RecursiveTests

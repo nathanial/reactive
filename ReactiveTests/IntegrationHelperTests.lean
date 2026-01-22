@@ -104,6 +104,5 @@ test "fromRefWithBehavior behavior always returns current value" := do
     SpiderM.liftIO samples.get
   shouldBe result [100, 200, 300]
 
-#generate_tests
 
 end ReactiveTests.IntegrationHelperTests

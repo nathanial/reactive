@@ -677,6 +677,5 @@ test "shopping cart calculates tax" := do
 
   assertFloat3Eq (25.0, 2.0, 27.0) result
 
-#generate_tests
 
 end ReactiveTests.IntegrationTests

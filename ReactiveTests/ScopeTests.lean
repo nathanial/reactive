@@ -258,6 +258,5 @@ test "Scope subscription count increases" := do
   -- Before: 0, After: 2 (one for each filterM)
   shouldBe result (0, 2)
 
-#generate_tests
 
 end ReactiveTests.ScopeTests

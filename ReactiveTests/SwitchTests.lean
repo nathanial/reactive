@@ -202,6 +202,5 @@ test "Event.switchDynM switches events with scope" := do
 
   shouldBe result [1, 2, 3]
 
-#generate_tests
 
 end ReactiveTests.SwitchTests

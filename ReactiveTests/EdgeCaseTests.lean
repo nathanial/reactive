@@ -322,6 +322,5 @@ test "multiple events firing in same frame maintain order" := do
     SpiderM.liftIO receivedRef.get
   shouldBe result [1, 2, 3, 4, 5]
 
-#generate_tests
 
 end ReactiveTests.EdgeCaseTests

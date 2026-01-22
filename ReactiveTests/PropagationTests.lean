@@ -218,6 +218,5 @@ test "mergeList with single event fires single-element list" := do
 
   shouldBe result [[42]]
 
-#generate_tests
 
 end ReactiveTests.PropagationTests

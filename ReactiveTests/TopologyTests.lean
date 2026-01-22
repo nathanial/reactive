@@ -393,6 +393,5 @@ test "dynamic zipWith with multiple dynamics" := do
     SpiderM.liftIO receivedRef.get
   shouldBe result [15, 33, 60]
 
-#generate_tests
 
 end ReactiveTests.TopologyTests

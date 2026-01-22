@@ -350,6 +350,5 @@ test "Multiple Dynamic.mapM with subscriptions" := do
     [false, true, false]    -- derived2: all 3 updates fire
   )
 
-#generate_tests
 
 end ReactiveTests.DynamicTests

@@ -229,6 +229,5 @@ test "throttle fires after interval" := do
 
   shouldBe result [1, 2]
 
-#generate_tests
 
 end ReactiveTests.TemporalTests

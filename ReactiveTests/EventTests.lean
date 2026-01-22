@@ -1266,6 +1266,5 @@ test "Event.difference with pure IO" := do
     SpiderM.liftIO receivedRef.get
   shouldBe result ["a", "b"]
 
-#generate_tests
 
 end ReactiveTests.EventTests

@@ -122,4 +122,3 @@ test "bench Drain Loop Sim 100" := do
   let elapsed ← start.elapsed
   IO.println s!"  [Drain Loop 100: {elapsed}]"
 
-#generate_tests

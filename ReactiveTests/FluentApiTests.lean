@@ -131,6 +131,5 @@ test "fluent scan' accumulates correctly" := do
     SpiderM.liftIO receivedRef.get
   shouldBe result [1, 3, 6]
 
-#generate_tests
 
 end ReactiveTests.FluentApiTests

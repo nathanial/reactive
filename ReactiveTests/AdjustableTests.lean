@@ -47,7 +47,7 @@ test "runWithReplaceRequester basic" := do
     let _ ← SpiderM.liftIO <| resultEvent.subscribe fun n =>
       resultsRef.modify (· ++ [n])
 
-    SpiderM.liftIO <| triggerReplace (pure 100)
+    triggerReplace (pure 100)
     SpiderM.liftIO resultsRef.get
   shouldBe result [42, 100]
 
@@ -60,14 +60,14 @@ test "traverseDynList updates when list changes" := do
     let resultDyn ← traverseDynList f listDyn
 
     let valuesRef ← SpiderM.liftIO <| IO.mkRef ([] : List (List Nat))
-    let _ ← SpiderM.liftIO <| resultDyn.updated.subscribe fun vals =>
+    let _ ← resultDyn.updated.subscribe fun vals =>
       valuesRef.modify (· ++ [vals])
 
     -- Get initial value
     let initial ← sample resultDyn.current
 
     -- Update the list
-    SpiderM.liftIO <| fireList [3, 4, 5]
+    fireList [3, 4, 5]
 
     let updates ← SpiderM.liftIO valuesRef.get
     pure (initial, updates)
@@ -76,6 +76,5 @@ test "traverseDynList updates when list changes" := do
   -- Update: [3, 4, 5] → [30, 40, 50]
   shouldBe result ([10, 20], [[30, 40, 50]])
 
-#generate_tests
 
 end ReactiveTests.AdjustableTests

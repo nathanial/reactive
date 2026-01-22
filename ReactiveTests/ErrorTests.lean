@@ -249,6 +249,5 @@ test "propagation depth limit error message mentions propagation" := do
   let hasMessage := decide (parts.length > 1)
   shouldBe hasMessage true
 
-#generate_tests
 
 end ReactiveTests.ErrorTests
