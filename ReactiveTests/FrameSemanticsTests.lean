@@ -18,8 +18,12 @@ intermediate states during event propagation are never observable.
 
 1. **Frame entry**: When a trigger fires outside a frame, it starts a new frame
 2. **Frame nesting**: When a trigger fires inside a frame, it enqueues without starting a new drain
-3. **Queue draining**: Events are processed in height order after callbacks complete
+3. **Queue draining**: Events are processed in **height order** (topological order based on
+   dependency depth—events closer to sources fire before derived events) after callbacks complete
 4. **Glitch freedom**: You cannot sample intermediate propagation states
+5. **Framed triggers**: `newTriggerEvent` returns a trigger that automatically wraps firing
+   with frame logic—this is why triggers behave consistently whether called from user code
+   or internal combinators
 
 ## Why This Matters
 
@@ -100,6 +104,11 @@ The current test design avoids this trap by not relying on synchronous propagati
 
 ### Execution Trace
 
+> **Note**: The trace below uses internal implementation concepts (`withFrame`, `rawTrigger`,
+> `drainQueue`, `inFrame`, etc.) to explain the behavior. These are not user-facing APIs—they're
+> the underlying mechanisms that make frame semantics work. Users interact with `newTriggerEvent`,
+> `foldDyn`, `sample`, etc., and the frame logic happens automatically.
+
 **Initial computation** (`computeWithState 5`):
 ```
 runWithReplaceM calls initial.run env
@@ -161,6 +170,8 @@ can't observe its synchronous effects within the same frame.
 -/
 test "replacement computations run inside caller's frame" := do
   let result ← runSpider do
+    -- newTriggerEvent returns a "framed trigger": calling triggerReplace automatically
+    -- wraps the fire in frame logic (starts frame if needed, drains queue after).
     let (replaceEvent, triggerReplace) ← newTriggerEvent (t := Spider) (a := SpiderM Nat)
 
     -- A computation that creates FRP infrastructure and returns a value.
@@ -168,7 +179,8 @@ test "replacement computations run inside caller's frame" := do
     -- dynamic, because sampling would give different results depending on
     -- whether we're inside a frame (replacement) or outside (initial).
     let computeWithState : Nat → SpiderM Nat := fun multiplier => do
-      -- Create fresh event and dynamic for this computation
+      -- Create fresh event and dynamic for this computation.
+      -- Note: `trigger` is also a framed trigger, so calling it will start/join a frame.
       let (evt, trigger) ← newTriggerEvent (t := Spider) (a := Nat)
       let _dyn ← foldDyn (fun x acc => acc + x) 0 evt
 
