@@ -265,15 +265,41 @@ SpiderM.setErrorHandler fun err => do
 
 ---
 
-### Worker Pool
+### Worker Pool (FRP-based)
+
+Worker pool that processes jobs via a command event stream with observable state:
 
 ```lean
-let pool ← WorkerPool.new config process
-let resultEvt ← pool.submit job priority
-let _ ← pool.completed.subscribe fun (job, result) => ...
-let n ← pool.pending
-pool.shutdown
+-- Command types for controlling the pool
+inductive PoolCommand (jobId job : Type) where
+  | submit (id : jobId) (job : job) (priority : Int)
+  | cancel (id : jobId)
+  | updatePriority (id : jobId) (newPriority : Int)
+  | resubmit (id : jobId) (job : job) (priority : Int)
+
+-- Create pool from command stream
+let (cmdEvt, fireCmd) ← newTriggerEvent (a := PoolCommand Nat MyJob)
+let (pool, handle) ← WorkerPool.fromCommandsWithShutdown config process cmdEvt
+
+-- Observable outputs
+let _ ← pool.completed.subscribe fun (id, job, result) => ...  -- Fires on completion
+let _ ← pool.cancelled.subscribe fun id => ...                  -- Fires on cancellation
+let _ ← pool.errored.subscribe fun (id, errMsg) => ...          -- Fires on error
+let pending ← pool.pendingCount.sample                          -- Dynamic of pending count
+let running ← pool.runningCount.sample                          -- Dynamic of running count
+let states ← pool.jobStates.sample                              -- Dynamic of all job statuses
+
+-- Submit/cancel via commands
+fireCmd (.submit 1 myJob 5)       -- Submit job with ID 1, priority 5
+fireCmd (.cancel 1)               -- Cancel job 1 (soft cancellation if running)
+fireCmd (.updatePriority 1 10)    -- Update priority of pending job
+fireCmd (.resubmit 1 newJob 5)    -- Cancel existing and submit fresh
+
+-- Graceful shutdown
+handle.shutdown
 ```
+
+Job statuses: `pending`, `running`, `completed`, `cancelled`, `error`
 
 ---
 

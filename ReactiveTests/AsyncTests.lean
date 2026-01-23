@@ -237,22 +237,28 @@ test "asyncOnEventWithRetry cancels retries on new event" := do
 
   shouldBe result (some 20)
 
-/-! ## Pattern 3: Worker Pool Tests -/
+/-! ## Pattern 3: Worker Pool Tests (FRP-based) -/
 
-test "worker pool processes jobs" := do
+test "worker pool processes jobs via command stream" := do
   let result ← runSpider do
     let config : WorkerPoolConfig := { workerCount := 2 }
-    let pool ← WorkerPool.new config fun (n : Nat) => do
-      IO.sleep 10
-      pure (n * 2)
+    -- Create command event stream
+    let (cmdEvt, fireCmd) ← newTriggerEvent (t := Spider) (a := PoolCommand Nat Nat)
 
-    let resultEvt ← pool.submit 5 0
+    -- Create the pool
+    let (pool, handle) ← WorkerPool.fromCommandsWithShutdown config
+      (fun (n : Nat) => do IO.sleep 10; pure (n * 2))
+      cmdEvt
+
     let receivedRef ← SpiderM.liftIO <| IO.mkRef (none : Option Nat)
-    let _ ← resultEvt.subscribe fun r =>
+    let _ ← pool.completed.subscribe fun (_, _, r) =>
       receivedRef.set (some r)
 
+    -- Submit job via command stream
+    SpiderM.liftIO <| fireCmd (.submit 1 5 0)
+
     SpiderM.liftIO <| IO.sleep 100
-    pool.shutdown
+    SpiderM.liftIO handle.shutdown
     SpiderM.liftIO receivedRef.get
 
   shouldBe result (some 10)
@@ -261,42 +267,48 @@ test "worker pool processes in priority order" := do
   let result ← runSpider do
     let config : WorkerPoolConfig := { workerCount := 1 }  -- Single worker for deterministic order
     let resultsRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
-    let pool ← WorkerPool.new config fun (n : Nat) => do
-      pure n
+    let (cmdEvt, fireCmd) ← newTriggerEvent (t := Spider) (a := PoolCommand Nat Nat)
 
-    let _ ← pool.completed.subscribe fun (_, r) =>
+    let (pool, handle) ← WorkerPool.fromCommandsWithShutdown config (fun (n : Nat) => pure n) cmdEvt
+
+    let _ ← pool.completed.subscribe fun (_, _, r) =>
       resultsRef.modify (· ++ [r])
 
-    -- Submit in reverse priority order
-    let _ ← pool.submit 3 1  -- Low priority
-    let _ ← pool.submit 2 5  -- High priority
-    let _ ← pool.submit 1 3  -- Medium priority
+    -- Submit in reverse priority order (with unique IDs)
+    -- All jobs are queued before any processing begins
+    SpiderM.liftIO <| fireCmd (.submit 1 3 1)  -- ID 1, job 3, priority 1 (low)
+    SpiderM.liftIO <| fireCmd (.submit 2 2 5)  -- ID 2, job 2, priority 5 (high)
+    SpiderM.liftIO <| fireCmd (.submit 3 1 3)  -- ID 3, job 1, priority 3 (medium)
 
     SpiderM.liftIO <| IO.sleep 100
-    pool.shutdown
+    SpiderM.liftIO handle.shutdown
     SpiderM.liftIO resultsRef.get
 
-  -- Should process in priority order: 2 (pri 5), 1 (pri 3), 3 (pri 1)
+  -- Should process in priority order: job 2 (pri 5), job 1 (pri 3), job 3 (pri 1)
   shouldBe result [2, 1, 3]
 
 test "worker pool graceful shutdown stops new jobs" := do
   let startedRef ← IO.mkRef (0 : Nat)
   let result ← runSpider do
     let config : WorkerPoolConfig := { workerCount := 1 }  -- Single worker
-    let pool ← WorkerPool.new config fun (_ : Nat) => do
-      startedRef.modify (· + 1)
-      IO.sleep 10
-      pure 0
+    let (cmdEvt, fireCmd) ← newTriggerEvent (t := Spider) (a := PoolCommand Nat Nat)
+
+    let (pool, handle) ← WorkerPool.fromCommandsWithShutdown config
+      (fun (_ : Nat) => do startedRef.modify (· + 1); IO.sleep 10; pure 0)
+      cmdEvt
+
+    -- Subscribe to see completions (for debugging)
+    let _ ← pool.completed.subscribe fun _ => pure ()
 
     -- Submit first job - it will start processing
-    let _ ← pool.submit 1 0
+    SpiderM.liftIO <| fireCmd (.submit 1 1 0)
     SpiderM.liftIO <| IO.sleep 5  -- Let worker pick it up
 
     -- Submit second job while first is processing
-    let _ ← pool.submit 2 0
+    SpiderM.liftIO <| fireCmd (.submit 2 2 0)
 
     -- Shutdown before second job can be processed
-    pool.shutdown
+    SpiderM.liftIO handle.shutdown
 
     -- Wait for everything to settle
     SpiderM.liftIO <| IO.sleep 50
@@ -304,6 +316,75 @@ test "worker pool graceful shutdown stops new jobs" := do
 
   -- Only first job should have started (second was discarded by shutdown)
   shouldBe result 1
+
+test "worker pool cancel pending job" := do
+  let result ← runSpider do
+    let config : WorkerPoolConfig := { workerCount := 1 }
+    let completedRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
+    let cancelledRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
+    let (cmdEvt, fireCmd) ← newTriggerEvent (t := Spider) (a := PoolCommand Nat Nat)
+
+    let (pool, handle) ← WorkerPool.fromCommandsWithShutdown config
+      (fun (n : Nat) => do IO.sleep 20; pure n)
+      cmdEvt
+
+    let _ ← pool.completed.subscribe fun (id, _, _) =>
+      completedRef.modify (· ++ [id])
+    let _ ← pool.cancelled.subscribe fun id =>
+      cancelledRef.modify (· ++ [id])
+
+    -- Submit first job (will start immediately)
+    SpiderM.liftIO <| fireCmd (.submit 1 10 0)
+    SpiderM.liftIO <| IO.sleep 5  -- Let worker pick it up
+
+    -- Submit second job (will be pending)
+    SpiderM.liftIO <| fireCmd (.submit 2 20 0)
+
+    -- Cancel second job while it's still pending
+    SpiderM.liftIO <| fireCmd (.cancel 2)
+
+    SpiderM.liftIO <| IO.sleep 100
+    SpiderM.liftIO handle.shutdown
+
+    let completed ← SpiderM.liftIO completedRef.get
+    let cancelled ← SpiderM.liftIO cancelledRef.get
+    pure (completed, cancelled)
+
+  -- First job completed, second was cancelled
+  shouldBe result.fst [1]
+  shouldBe result.snd [2]
+
+test "worker pool resubmit replaces pending job" := do
+  let result ← runSpider do
+    let config : WorkerPoolConfig := { workerCount := 1 }
+    let resultsRef ← SpiderM.liftIO <| IO.mkRef ([] : List (Nat × Nat))
+    let (cmdEvt, fireCmd) ← newTriggerEvent (t := Spider) (a := PoolCommand Nat Nat)
+
+    let (pool, handle) ← WorkerPool.fromCommandsWithShutdown config
+      (fun (n : Nat) => do IO.sleep 20; pure n)
+      cmdEvt
+
+    let _ ← pool.completed.subscribe fun (id, job, _) =>
+      resultsRef.modify (· ++ [(id, job)])
+
+    -- Submit first job (will start immediately)
+    SpiderM.liftIO <| fireCmd (.submit 1 10 0)
+    SpiderM.liftIO <| IO.sleep 5  -- Let worker pick it up
+
+    -- Submit second job (will be pending)
+    SpiderM.liftIO <| fireCmd (.submit 2 20 0)
+
+    -- Resubmit with same ID but different job (should replace)
+    SpiderM.liftIO <| fireCmd (.resubmit 2 30 0)
+
+    SpiderM.liftIO <| IO.sleep 150
+    SpiderM.liftIO handle.shutdown
+
+    SpiderM.liftIO resultsRef.get
+
+  -- First job completed, second completed with new value (30, not 20)
+  shouldBe result.length 2
+  shouldSatisfy (result.any fun (id, job) => id == 2 && job == 30) "resubmitted job should have new value"
 
 /-! ## Concurrency Stress Tests -/
 
@@ -392,11 +473,13 @@ test "worker pool concurrent submissions all complete" := do
   let result ← runSpider do
     let config : WorkerPoolConfig := { workerCount := 4 }
     let completedRef ← SpiderM.liftIO <| IO.mkRef (0 : Nat)
+    let (cmdEvt, fireCmd) ← newTriggerEvent (t := Spider) (a := PoolCommand Nat Nat)
 
-    let pool ← WorkerPool.new config fun (n : Nat) => do
-      -- Small work simulation
-      if n % 5 == 0 then IO.sleep 1
-      pure (n * 2)
+    let (pool, handle) ← WorkerPool.fromCommandsWithShutdown config
+      (fun (n : Nat) => do
+        if n % 5 == 0 then IO.sleep 1
+        pure (n * 2))
+      cmdEvt
 
     -- Subscribe to completion event
     let _ ← pool.completed.subscribe fun _ =>
@@ -404,45 +487,56 @@ test "worker pool concurrent submissions all complete" := do
 
     -- Submit many jobs (submissions are fast, processing is concurrent)
     for i in [0:numJobs] do
-      let _ ← pool.submit i (i % 10)
+      SpiderM.liftIO <| fireCmd (.submit i i (i % 10))
 
     -- Wait for processing to complete
     SpiderM.liftIO <| IO.sleep 300
-    pool.shutdown
+    SpiderM.liftIO handle.shutdown
 
     SpiderM.liftIO completedRef.get
 
   -- All jobs should have completed
   shouldBe result numJobs
 
-test "worker pool per-job result events fire correctly" := do
-  -- Test that individual result events fire even with concurrent submissions
-  -- Note: Jobs have a small delay to ensure subscriptions complete before results fire
-  let numJobs := 50
+test "worker pool observable state tracks jobs" := do
+  -- Test the new jobStates, pendingCount, runningCount dynamics
   let result ← runSpider do
-    let config : WorkerPoolConfig := { workerCount := 4 }
-    let resultsRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
+    let config : WorkerPoolConfig := { workerCount := 1 }  -- Single worker for predictable state
+    let (cmdEvt, fireCmd) ← newTriggerEvent (t := Spider) (a := PoolCommand Nat Nat)
 
-    let pool ← WorkerPool.new config fun (n : Nat) => do
-      -- Small delay ensures subscription happens before result fires
-      IO.sleep 5
-      pure (n * 3)
+    let (pool, handle) ← WorkerPool.fromCommandsWithShutdown config
+      (fun (n : Nat) => do IO.sleep 30; pure n)
+      cmdEvt
 
-    -- Submit jobs and track individual results
-    for i in [0:numJobs] do
-      let resultEvt ← pool.submit i 0
-      let _ ← resultEvt.subscribe fun r => do
-        resultsRef.modify (r :: ·)
+    -- Check initial state
+    let initialPending ← pool.pendingCount.sample
+    let initialRunning ← pool.runningCount.sample
 
-    -- Wait for processing - give enough time for all 50 jobs
-    SpiderM.liftIO <| IO.sleep 500
-    pool.shutdown
+    -- Submit two jobs
+    SpiderM.liftIO <| fireCmd (.submit 1 10 0)
+    SpiderM.liftIO <| fireCmd (.submit 2 20 0)
+    SpiderM.liftIO <| IO.sleep 10  -- Let first job start
 
-    let results ← SpiderM.liftIO resultsRef.get
-    pure results.length
+    let afterSubmitPending ← pool.pendingCount.sample
+    let afterSubmitRunning ← pool.runningCount.sample
 
-  -- All individual result events should have fired
-  shouldBe result numJobs
+    SpiderM.liftIO <| IO.sleep 100  -- Let all jobs complete
+    SpiderM.liftIO handle.shutdown
+
+    let finalPending ← pool.pendingCount.sample
+    let finalRunning ← pool.runningCount.sample
+
+    pure (initialPending, initialRunning, afterSubmitPending, afterSubmitRunning, finalPending, finalRunning)
+
+  -- Initial state: 0 pending, 0 running
+  shouldBe result.1 0
+  shouldBe result.2.1 0
+  -- After submit: 1 pending (one is running), 1 running
+  shouldBe result.2.2.1 1
+  shouldBe result.2.2.2.1 1
+  -- Final: 0 pending, 0 running
+  shouldBe result.2.2.2.2.1 0
+  shouldBe result.2.2.2.2.2 0
 
 test "mixed async operations under load" := do
   -- Combine multiple async patterns under concurrent load
@@ -460,9 +554,10 @@ test "mixed async operations under load" := do
         IO.sleep 5
         pure 42
 
-    -- Pattern 3: Worker pool
+    -- Pattern 3: Worker pool (FRP-based)
     let config : WorkerPoolConfig := { workerCount := 2 }
-    let pool ← WorkerPool.new config fun (n : Nat) => pure n
+    let (cmdEvt, fireCmd) ← newTriggerEvent (t := Spider) (a := PoolCommand Nat Nat)
+    let (pool, handle) ← WorkerPool.fromCommandsWithShutdown config (fun (n : Nat) => pure n) cmdEvt
     let _ ← pool.completed.subscribe fun _ =>
       counterRef.modify (· + 1)
 
@@ -473,9 +568,9 @@ test "mixed async operations under load" := do
         set1 i
       SpiderM.liftIO <| tasksRef.modify (task :: ·)
 
-    -- Submit worker pool jobs (not concurrent - just fast sequential submissions)
+    -- Submit worker pool jobs via command stream
     for i in [0:20] do
-      let _ ← pool.submit i 0
+      SpiderM.liftIO <| fireCmd (.submit i i 0)
 
     -- Wait for all concurrent pushState tasks
     let tasks ← SpiderM.liftIO tasksRef.get
@@ -483,7 +578,7 @@ test "mixed async operations under load" := do
       let _ ← SpiderM.liftIO <| IO.wait task
 
     SpiderM.liftIO <| IO.sleep 200
-    pool.shutdown
+    SpiderM.liftIO handle.shutdown
 
     -- Should have: 20 pushState updates + 20 worker pool completions = 40
     SpiderM.liftIO counterRef.get
