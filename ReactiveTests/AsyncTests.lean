@@ -538,6 +538,360 @@ test "worker pool observable state tracks jobs" := do
   shouldBe result.2.2.2.2.1 0
   shouldBe result.2.2.2.2.2 0
 
+-- Helper to wait for a condition with timeout
+private partial def waitUntil (condition : IO Bool) (timeoutMs : Nat) (intervalMs : Nat := 5) : IO Bool := do
+  let rec loop (remaining : Nat) : IO Bool := do
+    if remaining == 0 then return false
+    if ← condition then return true
+    IO.sleep (UInt32.ofNat intervalMs)
+    if remaining > intervalMs then
+      loop (remaining - intervalMs)
+    else
+      return false
+  loop timeoutMs
+
+test "worker pool fires errored event on job exception" := do
+  let result ← runSpider do
+    let config : WorkerPoolConfig := { workerCount := 1 }
+    let (cmdEvt, fireCmd) ← newTriggerEvent (t := Spider) (a := PoolCommand Nat Nat)
+
+    let (pool, handle) ← WorkerPool.fromCommandsWithShutdown config
+      (fun (_ : Nat) => do throw (IO.userError "job failed!") : Nat → IO Nat)
+      cmdEvt
+
+    let erroredRef ← SpiderM.liftIO <| IO.mkRef ([] : List (Nat × String))
+    let _ ← pool.errored.subscribe fun (id, msg) =>
+      erroredRef.modify (· ++ [(id, msg)])
+
+    -- Submit a job that will throw
+    SpiderM.liftIO <| fireCmd (.submit 1 100 0)
+
+    -- Wait until error event fires (with timeout)
+    let _ ← SpiderM.liftIO <| waitUntil (do return (← erroredRef.get).length >= 1) 500
+
+    SpiderM.liftIO handle.shutdown
+    SpiderM.liftIO erroredRef.get
+
+  -- Should have received error event for job 1
+  shouldBe result.length 1
+  match result.head? with
+  | some (id, _) => shouldBe id 1
+  | none => shouldBe false true  -- Fail: expected an error
+
+test "worker pool rejects duplicate job ID" := do
+  let result ← runSpider do
+    let config : WorkerPoolConfig := { workerCount := 1 }
+    let (cmdEvt, fireCmd) ← newTriggerEvent (t := Spider) (a := PoolCommand Nat Nat)
+
+    let (pool, handle) ← WorkerPool.fromCommandsWithShutdown config
+      (fun (n : Nat) => do IO.sleep 50; pure n)  -- Job takes 50ms
+      cmdEvt
+
+    let erroredRef ← SpiderM.liftIO <| IO.mkRef ([] : List (Nat × String))
+    let completedRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
+    let runningRef ← SpiderM.liftIO <| IO.mkRef (0 : Nat)
+
+    let _ ← pool.errored.subscribe fun (id, msg) =>
+      erroredRef.modify (· ++ [(id, msg)])
+    let _ ← pool.completed.subscribe fun (id, _, _) =>
+      completedRef.modify (· ++ [id])
+    -- Track running count changes
+    let _ ← pool.runningCount.updated.subscribe fun n =>
+      runningRef.set n
+
+    -- Submit job 1
+    SpiderM.liftIO <| fireCmd (.submit 1 100 0)
+
+    -- Wait until job 1 is running
+    let _ ← SpiderM.liftIO <| waitUntil (do return (← runningRef.get) >= 1) 200
+
+    -- Try to submit another job with same ID - should be rejected
+    SpiderM.liftIO <| fireCmd (.submit 1 200 0)
+
+    -- Wait for duplicate error and original completion
+    let _ ← SpiderM.liftIO <| waitUntil (do
+      let errors ← erroredRef.get
+      let completed ← completedRef.get
+      return errors.length >= 1 && completed.length >= 1) 500
+
+    SpiderM.liftIO handle.shutdown
+
+    let errors ← SpiderM.liftIO erroredRef.get
+    let completed ← SpiderM.liftIO completedRef.get
+    pure (errors, completed)
+
+  -- Should have received error event for duplicate ID
+  shouldBe result.1.length 1
+  match result.1.head? with
+  | some (id, _) => shouldBe id 1
+  | none => shouldBe false true  -- Fail: expected an error
+  -- Original job should still complete (not cancelled by duplicate attempt)
+  shouldBe result.2 [1]
+
+test "worker pool soft-cancels running job" := do
+  let result ← runSpider do
+    let config : WorkerPoolConfig := { workerCount := 1 }
+    let (cmdEvt, fireCmd) ← newTriggerEvent (t := Spider) (a := PoolCommand Nat Nat)
+
+    let (pool, handle) ← WorkerPool.fromCommandsWithShutdown config
+      (fun (n : Nat) => do IO.sleep 100; pure n)  -- Slow job (100ms)
+      cmdEvt
+
+    let completedRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
+    let cancelledRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
+    let runningRef ← SpiderM.liftIO <| IO.mkRef (0 : Nat)
+
+    let _ ← pool.completed.subscribe fun (id, _, _) =>
+      completedRef.modify (· ++ [id])
+    let _ ← pool.cancelled.subscribe fun id =>
+      cancelledRef.modify (· ++ [id])
+    let _ ← pool.runningCount.updated.subscribe fun n =>
+      runningRef.set n
+
+    -- Submit a slow job
+    SpiderM.liftIO <| fireCmd (.submit 1 100 0)
+
+    -- Wait until job is running
+    let _ ← SpiderM.liftIO <| waitUntil (do return (← runningRef.get) >= 1) 200
+
+    -- Cancel while running
+    SpiderM.liftIO <| fireCmd (.cancel 1)
+
+    -- Wait until cancelled event fires
+    let _ ← SpiderM.liftIO <| waitUntil (do
+      let cancelled ← cancelledRef.get
+      return cancelled.length >= 1) 500
+
+    -- Wait a bit more to ensure job IO completes (result discarded)
+    SpiderM.liftIO <| IO.sleep 150
+
+    SpiderM.liftIO handle.shutdown
+
+    let completed ← SpiderM.liftIO completedRef.get
+    let cancelled ← SpiderM.liftIO cancelledRef.get
+    pure (completed, cancelled)
+
+  -- Job should be cancelled, not completed (soft cancellation discards result)
+  shouldBe result.1 []
+  shouldBe result.2 [1]
+
+test "worker pool resubmit cancels running job" := do
+  let result ← runSpider do
+    let config : WorkerPoolConfig := { workerCount := 1 }
+    let (cmdEvt, fireCmd) ← newTriggerEvent (t := Spider) (a := PoolCommand Nat Nat)
+
+    let (pool, handle) ← WorkerPool.fromCommandsWithShutdown config
+      (fun (n : Nat) => do IO.sleep 50; pure n)
+      cmdEvt
+
+    let completedRef ← SpiderM.liftIO <| IO.mkRef ([] : List (Nat × Nat))
+    let cancelledRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
+    let runningRef ← SpiderM.liftIO <| IO.mkRef (0 : Nat)
+
+    let _ ← pool.completed.subscribe fun (id, payload, _) =>
+      completedRef.modify (· ++ [(id, payload)])
+    let _ ← pool.cancelled.subscribe fun id =>
+      cancelledRef.modify (· ++ [id])
+    let _ ← pool.runningCount.updated.subscribe fun n =>
+      runningRef.set n
+
+    -- Submit job with payload 100
+    SpiderM.liftIO <| fireCmd (.submit 1 100 0)
+
+    -- Wait until job is running
+    let _ ← SpiderM.liftIO <| waitUntil (do return (← runningRef.get) >= 1) 200
+
+    -- Resubmit with new payload 200 (should cancel original)
+    SpiderM.liftIO <| fireCmd (.resubmit 1 200 0)
+
+    -- Wait for cancellation and then completion with new payload
+    let _ ← SpiderM.liftIO <| waitUntil (do
+      let cancelled ← cancelledRef.get
+      let completed ← completedRef.get
+      return cancelled.length >= 1 && completed.length >= 1) 500
+
+    SpiderM.liftIO handle.shutdown
+
+    let completed ← SpiderM.liftIO completedRef.get
+    let cancelled ← SpiderM.liftIO cancelledRef.get
+    pure (completed, cancelled)
+
+  -- Should have one cancellation and one completion with new payload
+  shouldBe result.2 [1]  -- Cancelled once
+  shouldBe result.1.length 1  -- One completion
+  match result.1.head? with
+  | some (_, payload) => shouldBe payload 200  -- With new payload
+  | none => shouldBe false true  -- Fail: expected completion
+
+test "worker pool updatePriority reorders pending jobs" := do
+  let result ← runSpider do
+    let config : WorkerPoolConfig := { workerCount := 1 }  -- Single worker for deterministic ordering
+    let (cmdEvt, fireCmd) ← newTriggerEvent (t := Spider) (a := PoolCommand Nat Nat)
+
+    let (pool, handle) ← WorkerPool.fromCommandsWithShutdown config
+      (fun (n : Nat) => do IO.sleep 30; pure n)
+      cmdEvt
+
+    let completedRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
+    let runningRef ← SpiderM.liftIO <| IO.mkRef (0 : Nat)
+
+    let _ ← pool.completed.subscribe fun (id, _, _) =>
+      completedRef.modify (· ++ [id])
+    let _ ← pool.runningCount.updated.subscribe fun n =>
+      runningRef.set n
+
+    -- Submit a blocking job first to queue up the others
+    SpiderM.liftIO <| fireCmd (.submit 0 0 100)  -- High priority, will start immediately
+
+    -- Wait until job 0 is running
+    let _ ← SpiderM.liftIO <| waitUntil (do return (← runningRef.get) >= 1) 200
+
+    -- Now submit the test jobs - they'll all be pending while job 0 runs
+    SpiderM.liftIO <| fireCmd (.submit 1 10 1)   -- Priority 1 (low)
+    SpiderM.liftIO <| fireCmd (.submit 2 20 5)   -- Priority 5 (medium)
+    SpiderM.liftIO <| fireCmd (.submit 3 30 10)  -- Priority 10 (high)
+
+    -- Without update, order after job 0 would be: 3, 2, 1
+    -- Update job 1's priority to highest (20)
+    SpiderM.liftIO <| fireCmd (.updatePriority 1 20)
+
+    -- Wait for all 4 jobs to complete
+    let _ ← SpiderM.liftIO <| waitUntil (do
+      let completed ← completedRef.get
+      return completed.length >= 4) 500
+
+    SpiderM.liftIO handle.shutdown
+    SpiderM.liftIO completedRef.get
+
+  -- Job 0 completes first (it was running)
+  -- After priority update, job 1 (priority 20) goes first, then 3 (10), then 2 (5)
+  shouldBe result [0, 1, 3, 2]
+
+test "worker pool jobStates tracks all job statuses" := do
+  let result ← runSpider do
+    let config : WorkerPoolConfig := { workerCount := 1 }
+    let (cmdEvt, fireCmd) ← newTriggerEvent (t := Spider) (a := PoolCommand Nat Nat)
+
+    let (pool, handle) ← WorkerPool.fromCommandsWithShutdown config
+      (fun (n : Nat) => do
+        if n == 2 then throw (IO.userError "error!")
+        IO.sleep 30
+        pure n)
+      cmdEvt
+
+    let completedRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
+    let erroredRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
+    let cancelledRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
+    let runningRef ← SpiderM.liftIO <| IO.mkRef (0 : Nat)
+
+    let _ ← pool.completed.subscribe fun (id, _, _) =>
+      completedRef.modify (· ++ [id])
+    let _ ← pool.errored.subscribe fun (id, _) =>
+      erroredRef.modify (· ++ [id])
+    let _ ← pool.cancelled.subscribe fun id =>
+      cancelledRef.modify (· ++ [id])
+    let _ ← pool.runningCount.updated.subscribe fun n =>
+      runningRef.set n
+
+    -- Submit three jobs with different fates
+    SpiderM.liftIO <| fireCmd (.submit 1 1 0)   -- Will complete
+    SpiderM.liftIO <| fireCmd (.submit 2 2 0)   -- Will error
+    SpiderM.liftIO <| fireCmd (.submit 3 3 0)   -- Will be cancelled
+
+    -- Wait until job 1 is running
+    let _ ← SpiderM.liftIO <| waitUntil (do return (← runningRef.get) >= 1) 200
+
+    -- Cancel job 3 (still pending)
+    SpiderM.liftIO <| fireCmd (.cancel 3)
+
+    -- Wait until all jobs reach terminal states (1 completed + 1 errored + 1 cancelled)
+    let _ ← SpiderM.liftIO <| waitUntil (do
+      let completed ← completedRef.get
+      let errored ← erroredRef.get
+      let cancelled ← cancelledRef.get
+      return completed.length >= 1 && errored.length >= 1 && cancelled.length >= 1) 500
+
+    -- Sample jobStates (now that all events have fired)
+    let states ← pool.jobStates.sample
+    SpiderM.liftIO handle.shutdown
+
+    pure (states[1]?, states[2]?, states[3]?)
+
+  -- Check each job's final status
+  shouldBe result.1 (some JobStatus.completed)
+  shouldBe result.2.1 (some JobStatus.error)
+  shouldBe result.2.2 (some JobStatus.cancelled)
+
+test "worker pool processes same-priority jobs in FIFO order" := do
+  let result ← runSpider do
+    let config : WorkerPoolConfig := { workerCount := 1 }  -- Single worker for deterministic ordering
+    let (cmdEvt, fireCmd) ← newTriggerEvent (t := Spider) (a := PoolCommand Nat Nat)
+
+    let (pool, handle) ← WorkerPool.fromCommandsWithShutdown config
+      (fun (n : Nat) => do IO.sleep 10; pure n)
+      cmdEvt
+
+    let completedRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
+    let _ ← pool.completed.subscribe fun (id, _, _) =>
+      completedRef.modify (· ++ [id])
+
+    -- Submit jobs all with same priority (5)
+    SpiderM.liftIO <| fireCmd (.submit 1 10 5)
+    SpiderM.liftIO <| fireCmd (.submit 2 20 5)
+    SpiderM.liftIO <| fireCmd (.submit 3 30 5)
+    SpiderM.liftIO <| fireCmd (.submit 4 40 5)
+
+    -- Wait for all 4 jobs to complete
+    let _ ← SpiderM.liftIO <| waitUntil (do
+      let completed ← completedRef.get
+      return completed.length >= 4) 500
+
+    SpiderM.liftIO handle.shutdown
+    SpiderM.liftIO completedRef.get
+
+  -- Should complete in FIFO order (1, 2, 3, 4)
+  shouldBe result [1, 2, 3, 4]
+
+-- Compile-time type check: fromCommands returns PoolOutput (not a tuple with handle)
+-- This ensures the API exists and has the expected return type
+#check (WorkerPool.fromCommands : WorkerPoolConfig → (Nat → IO Nat) →
+        Evt (PoolCommand Nat Nat) → SpiderM (PoolOutput Nat Nat Nat))
+
+test "worker pool fromCommands basic functionality" := do
+  -- Tests that fromCommands creates a working pool
+  -- Note: Workers created by fromCommands run until process exits, so we use
+  -- fromCommandsWithShutdown for testability while verifying equivalent behavior
+  let result ← runSpider do
+    let config : WorkerPoolConfig := { workerCount := 1 }
+    let (cmdEvt, fireCmd) ← newTriggerEvent (t := Spider) (a := PoolCommand Nat Nat)
+
+    -- fromCommands internally calls fromCommandsWithShutdown and discards handle
+    -- We test the same code path but keep the handle for cleanup
+    let (pool, handle) ← WorkerPool.fromCommandsWithShutdown config
+      (fun (n : Nat) => pure (n * 2))
+      cmdEvt
+
+    let completedRef ← SpiderM.liftIO <| IO.mkRef ([] : List (Nat × Nat))
+    let _ ← pool.completed.subscribe fun (id, _, res) =>
+      completedRef.modify (· ++ [(id, res)])
+
+    SpiderM.liftIO <| fireCmd (.submit 1 5 0)
+    SpiderM.liftIO <| fireCmd (.submit 2 10 0)
+
+    -- Wait for both jobs to complete
+    let _ ← SpiderM.liftIO <| waitUntil (do
+      let completed ← completedRef.get
+      return completed.length >= 2) 500
+
+    SpiderM.liftIO handle.shutdown
+    SpiderM.liftIO completedRef.get
+
+  -- Basic functionality should work
+  shouldBe result.length 2
+  -- Results should have correct values (job * 2)
+  let sorted := result.toArray.qsort (·.1 < ·.1) |>.toList
+  shouldBe sorted [(1, 10), (2, 20)]
+
 test "mixed async operations under load" := do
   -- Combine multiple async patterns under concurrent load
   let result ← runSpider do
