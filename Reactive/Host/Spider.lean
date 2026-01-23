@@ -12,3 +12,5 @@ import Reactive.Host.Spider.Dynamic
 import Reactive.Host.Spider.Behavior
 import Reactive.Host.Spider.Event
 import Reactive.Host.Spider.Integration
+import Reactive.Host.Spider.Async
+import Reactive.Host.Spider.WorkerPool
