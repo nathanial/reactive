@@ -295,11 +295,16 @@ def new [Inhabited job] (config : WorkerPoolConfig) (process : job → IO result
       -- Create job
       let theJob ← jobQueue.nextJob jobPayload priority
 
-      -- Try to push; if queue is closed, don't register trigger or increment pending
+      -- Register trigger BEFORE pushing to queue - a fast worker could complete
+      -- before we register if we did this after push
+      triggersRef.modify (·.insert theJob.id framedFireResult)
+      pendingRef.modify (· + 1)
+
+      -- Try to push; if queue is closed, clean up the trigger we just registered
       let wasPushed ← jobQueue.pushIfOpen theJob
-      if wasPushed then
-        triggersRef.modify (·.insert theJob.id framedFireResult)
-        pendingRef.modify (· + 1)
+      if !wasPushed then
+        triggersRef.modify (·.erase theJob.id)
+        pendingRef.modify (· - 1)
 
       pure resultEvent⟩
 

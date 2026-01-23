@@ -9,6 +9,7 @@ import Reactive.Class
 import Reactive.Combinators
 import Chronos
 import Std.Data.HashMap
+import Std.Sync.RecursiveMutex
 
 namespace Reactive.Host
 
@@ -73,8 +74,9 @@ structure SpiderEnv where
   constructionDepth : IO.Ref Nat
   /-- Propagation depth counter for infinite event loop detection -/
   propagationDepth : IO.Ref Nat
-  /-- Mutex to serialize frame execution across threads -/
-  frameMutex : Std.Mutex Unit
+  /-- Recursive mutex to serialize frame execution across threads.
+      Uses BaseRecursiveMutex to allow same-thread reentrant locking without deadlock. -/
+  frameMutex : Std.BaseRecursiveMutex
 
 namespace SpiderEnv
 
@@ -88,7 +90,7 @@ def new (errorHandler : PropagationErrorHandler := defaultErrorHandler) : IO Spi
   let errorHandlerRef ← IO.mkRef errorHandler
   let constructionDepth ← IO.mkRef 0
   let propagationDepth ← IO.mkRef 0
-  let frameMutex ← Std.Mutex.new ()
+  let frameMutex ← Std.BaseRecursiveMutex.new
   -- Set global propagation context for frame-based firing
   setPropagationContext propagationQueue
   pure { timelineCtx, postBuildActions, postBuildEvent, postBuildTrigger, propagationQueue, currentScope, errorHandler := errorHandlerRef, constructionDepth, propagationDepth, frameMutex }
@@ -141,38 +143,31 @@ where
     If already in a frame, just runs the action (it will enqueue).
     If not in a frame, starts a new frame, runs action, then drains queue.
 
-    Thread-safety: Frame execution is serialized via mutex to prevent concurrent
-    async completions from interleaving frame operations and corrupting the
-    propagation queue. The mutex is held for the entire frame duration to prevent
-    race conditions. Recursive calls (from within the frame) check `inFrame` before
-    acquiring the lock to avoid deadlock. -/
+    Thread-safety: Frame execution is serialized via a recursive mutex to prevent
+    concurrent async completions from interleaving frame operations. The recursive
+    mutex allows same-thread reentrant locking without deadlock, while blocking
+    other threads until the frame completes. -/
 def withFrame (env : SpiderEnv) (action : IO Unit) : IO Unit := do
-  -- Fast path: if already in a frame, this is a recursive call from the same
-  -- thread (since we hold the mutex). Just run action - it will enqueue.
+  -- Acquire recursive mutex - same thread can lock multiple times without blocking,
+  -- but other threads will wait until we fully release
+  env.frameMutex.lock
   let inFrame ← env.propagationQueue.isInFrame
   if inFrame then
-    action
-  else
-    -- Need to start a frame - acquire mutex for thread safety
-    env.frameMutex.mutex.lock
-    -- Double-check inside lock: another thread may have started a frame between
-    -- our check and lock acquisition
-    let inFrameNow ← env.propagationQueue.isInFrame
-    if inFrameNow then
-      -- Another thread started a frame and released the lock (but hasn't cleared
-      -- inFrame yet). Run our action - it will enqueue to their frame.
-      env.frameMutex.mutex.unlock
+    -- Already in a frame (reentrant call from same thread), just run action
+    try
       action
-    else
-      -- We're starting a new frame. Keep mutex held until frame completes.
-      env.propagationDepth.set 0
-      env.propagationQueue.setInFrame true
-      try
-        action
-        env.drainQueue
-      finally
-        env.propagationQueue.setInFrame false
-        env.frameMutex.mutex.unlock
+    finally
+      env.frameMutex.unlock
+  else
+    -- Starting a new frame
+    env.propagationDepth.set 0
+    env.propagationQueue.setInFrame true
+    try
+      action
+      env.drainQueue
+    finally
+      env.propagationQueue.setInFrame false
+      env.frameMutex.unlock
 
 end SpiderEnv
 
