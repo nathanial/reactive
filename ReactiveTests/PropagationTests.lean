@@ -21,11 +21,11 @@ test "height ordering is respected" := do
     let orderRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
 
     -- Subscribe to all in reverse order of height
-    let _ ← SpiderM.liftIO <| e3.subscribe fun n => orderRef.modify (· ++ [n])
-    let _ ← SpiderM.liftIO <| e1.subscribe fun n => orderRef.modify (· ++ [n])
-    let _ ← SpiderM.liftIO <| e2.subscribe fun n => orderRef.modify (· ++ [n])
+    let _ ← e3.subscribe fun n => orderRef.modify (· ++ [n])
+    let _ ← e1.subscribe fun n => orderRef.modify (· ++ [n])
+    let _ ← e2.subscribe fun n => orderRef.modify (· ++ [n])
 
-    SpiderM.liftIO <| fire ()
+    fire ()
     SpiderM.liftIO orderRef.get
 
   -- Should fire in height order: e1 (h1), e2 (h2), e3 (h3)
@@ -43,11 +43,11 @@ test "diamond dependency fires in height order" := do
 
     -- Track all values seen by merged
     let seenRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
-    let _ ← SpiderM.liftIO <| merged.subscribe fun n =>
+    let _ ← merged.subscribe fun n =>
       seenRef.modify (· ++ [n])
 
     -- Fire trigger with value 5
-    SpiderM.liftIO <| fire 5
+    fire 5
 
     SpiderM.liftIO seenRef.get
 
@@ -62,13 +62,13 @@ test "multiple triggers in sequence create separate frames" := do
     let mapped ← Event.mapM (· * 2) trigger
 
     let valuesRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
-    let _ ← SpiderM.liftIO <| mapped.subscribe fun n =>
+    let _ ← mapped.subscribe fun n =>
       valuesRef.modify (· ++ [n])
 
     -- Fire twice - each should be a complete frame
-    SpiderM.liftIO <| fire 1
-    SpiderM.liftIO <| fire 2
-    SpiderM.liftIO <| fire 3
+    fire 1
+    fire 2
+    fire 3
 
     SpiderM.liftIO valuesRef.get
 
@@ -82,14 +82,14 @@ test "nested triggers within a frame are processed in order" := do
     let orderRef ← SpiderM.liftIO <| IO.mkRef ([] : List String)
 
     -- When outer fires, also fire inner
-    let _ ← SpiderM.liftIO <| outerTrigger.subscribe fun n => do
+    let _ ← outerTrigger.subscribe fun n => do
       orderRef.modify (· ++ [s!"outer:{n}"])
       fireInner (n * 10)
 
-    let _ ← SpiderM.liftIO <| innerTrigger.subscribe fun n =>
+    let _ ← innerTrigger.subscribe fun n =>
       orderRef.modify (· ++ [s!"inner:{n}"])
 
-    SpiderM.liftIO <| fireOuter 5
+    fireOuter 5
     SpiderM.liftIO orderRef.get
 
   -- Outer fires first (it started the frame), then inner
@@ -122,10 +122,10 @@ test "complex graph maintains height ordering" := do
     let abc ← Event.mergeM ab bc
 
     let orderRef ← SpiderM.liftIO <| IO.mkRef ([] : List String)
-    let _ ← SpiderM.liftIO <| abc.subscribe fun s =>
+    let _ ← abc.subscribe fun s =>
       orderRef.modify (· ++ [s])
 
-    SpiderM.liftIO <| fire 1
+    fire 1
     SpiderM.liftIO orderRef.get
 
   -- All height-1 events (a, b, c) fire first
@@ -145,18 +145,18 @@ test "mergeList batches simultaneous events" := do
     let merged ← Event.mergeListM [t1, t2, t3]
 
     let batchesRef ← SpiderM.liftIO <| IO.mkRef ([] : List (List Nat))
-    let _ ← SpiderM.liftIO <| merged.subscribe fun batch =>
+    let _ ← merged.subscribe fun batch =>
       batchesRef.modify (· ++ [batch])
 
     -- Fire all three in the same frame (same trigger call triggers all)
     -- We need a single event that triggers all three
     let (combo, fireCombo) ← newTriggerEvent (t := Spider) (a := Unit)
-    let _ ← SpiderM.liftIO <| combo.subscribe fun _ => do
+    let _ ← combo.subscribe fun _ => do
       fire1 1
       fire2 2
       fire3 3
 
-    SpiderM.liftIO <| fireCombo ()
+    fireCombo ()
     SpiderM.liftIO batchesRef.get
 
   -- Should receive one batch with all three values
@@ -173,10 +173,10 @@ test "mergeList batches from diamond pattern" := do
     let merged ← Event.mergeListM [e1, e2]
 
     let batchesRef ← SpiderM.liftIO <| IO.mkRef ([] : List (List Nat))
-    let _ ← SpiderM.liftIO <| merged.subscribe fun batch =>
+    let _ ← merged.subscribe fun batch =>
       batchesRef.modify (· ++ [batch])
 
-    SpiderM.liftIO <| fire 5
+    fire 5
     SpiderM.liftIO batchesRef.get
 
   -- Both e1 and e2 fire in same frame, should be batched
@@ -191,12 +191,12 @@ test "mergeList separate frames produce separate batches" := do
     let merged ← Event.mergeListM [t1, t2]
 
     let batchesRef ← SpiderM.liftIO <| IO.mkRef ([] : List (List Nat))
-    let _ ← SpiderM.liftIO <| merged.subscribe fun batch =>
+    let _ ← merged.subscribe fun batch =>
       batchesRef.modify (· ++ [batch])
 
     -- Fire in separate frames
-    SpiderM.liftIO <| fire1 1
-    SpiderM.liftIO <| fire2 2
+    fire1 1
+    fire2 2
 
     SpiderM.liftIO batchesRef.get
 
@@ -210,10 +210,10 @@ test "mergeList with single event fires single-element list" := do
     let merged ← Event.mergeListM [trigger]
 
     let batchesRef ← SpiderM.liftIO <| IO.mkRef ([] : List (List Nat))
-    let _ ← SpiderM.liftIO <| merged.subscribe fun batch =>
+    let _ ← merged.subscribe fun batch =>
       batchesRef.modify (· ++ [batch])
 
-    SpiderM.liftIO <| fire 42
+    fire 42
     SpiderM.liftIO batchesRef.get
 
   shouldBe result [[42]]

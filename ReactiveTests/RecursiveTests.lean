@@ -25,11 +25,11 @@ test "fixDynM creates self-referential dynamic" := do
     let fire ← SpiderM.liftIO fireRef.get
 
     -- Fire 5 times, but only first 3 should count
-    SpiderM.liftIO <| fire ()
-    SpiderM.liftIO <| fire ()
-    SpiderM.liftIO <| fire ()
-    SpiderM.liftIO <| fire ()  -- Should be filtered (counter = 3)
-    SpiderM.liftIO <| fire ()  -- Should be filtered
+    fire ()
+    fire ()
+    fire ()
+    fire ()  -- Should be filtered (counter = 3)
+    fire ()  -- Should be filtered
 
     sample counter.current
 
@@ -73,16 +73,16 @@ test "fixDynM behavior samples real dynamic after wiring" := do
       let counter' ← foldDyn (fun _ n => n + 1) 0 clicks
 
       -- Subscribe to sample the behavior on each update
-      let _ ← SpiderM.liftIO <| counter'.updated.subscribe fun _ => do
+      let _ ← counter'.updated.subscribe fun _ => do
         let c ← counterBehavior.sample
         sampledRef.modify (· ++ [c])
 
       pure counter'
 
     let fire ← SpiderM.liftIO fireRef.get
-    SpiderM.liftIO <| fire ()
-    SpiderM.liftIO <| fire ()
-    SpiderM.liftIO <| fire ()
+    fire ()
+    fire ()
+    fire ()
 
     SpiderM.liftIO sampledRef.get
 

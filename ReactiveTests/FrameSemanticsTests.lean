@@ -200,7 +200,7 @@ test "replacement computations run inside caller's frame" := do
 
     -- Collect all results: initial value plus any replacement values
     let resultsRef ← SpiderM.liftIO <| IO.mkRef [initial]
-    let _ ← SpiderM.liftIO <| resultEvent.subscribe fun n =>
+    let _ ← resultEvent.subscribe fun n =>
       resultsRef.modify (· ++ [n])
 
     -- Trigger a replacement. This fires replaceEvent, which:
@@ -259,7 +259,7 @@ test "same code behaves differently inside vs outside frame" := do
 
     -- Collect replacement results
     let insideFrameRef ← SpiderM.liftIO <| IO.mkRef 0
-    let _ ← SpiderM.liftIO <| resultEvent.subscribe fun n =>
+    let _ ← resultEvent.subscribe fun n =>
       insideFrameRef.set n
 
     -- Run as replacement (inside triggerReplace's frame)
@@ -304,7 +304,7 @@ test "replacement tears down old network, new network works" := do
     let createDynamicForExternal : Nat → SpiderM Nat := fun initialValue => do
       let dyn ← foldDyn (fun x acc => acc + x) initialValue externalEvent
       -- Subscribe to observe updates (this subscription will be disposed on replacement)
-      let _ ← SpiderM.liftIO <| dyn.updated.subscribe fun val =>
+      let _ ← dyn.updated.subscribe fun val =>
         valuesRef.modify (· ++ [val])
       pure initialValue
 
@@ -358,7 +358,7 @@ test "full replacement lifecycle with multiple replacements" := do
     let createNetwork : String → Nat → SpiderM String := fun label initialValue => do
       let dyn ← foldDyn (fun x acc => acc + x) initialValue externalEvent
       -- Subscribe to log all updates with this network's label
-      let _ ← SpiderM.liftIO <| dyn.updated.subscribe fun val =>
+      let _ ← dyn.updated.subscribe fun val =>
         logRef.modify (· ++ [(label, val)])
       pure label
 
@@ -425,7 +425,7 @@ test "replacement disposes nested infrastructure" := do
       let dyn2 ← foldDyn (fun (x : Nat) (acc : Nat) => acc + x) 0 derived
 
       -- Subscribe to the derived dynamic's updates
-      let _ ← SpiderM.liftIO <| dyn2.updated.subscribe fun val =>
+      let _ ← dyn2.updated.subscribe fun val =>
         logRef.modify (· ++ [val])
 
       pure multiplier

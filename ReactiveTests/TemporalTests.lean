@@ -18,12 +18,12 @@ test "delayFrame delays to next frame" := do
     let delayed ← Event.delayFrameM trigger
 
     let orderRef ← SpiderM.liftIO <| IO.mkRef ([] : List String)
-    let _ ← SpiderM.liftIO <| trigger.subscribe fun n =>
+    let _ ← trigger.subscribe fun n =>
       orderRef.modify (· ++ [s!"immediate:{n}"])
-    let _ ← SpiderM.liftIO <| delayed.subscribe fun n =>
+    let _ ← delayed.subscribe fun n =>
       orderRef.modify (· ++ [s!"delayed:{n}"])
 
-    SpiderM.liftIO <| fire 1
+    fire 1
     SpiderM.liftIO orderRef.get
 
   -- Immediate fires in frame 1, delayed fires in frame 2
@@ -35,12 +35,12 @@ test "delayFrame preserves value order" := do
     let delayed ← Event.delayFrameM trigger
 
     let valuesRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
-    let _ ← SpiderM.liftIO <| delayed.subscribe fun n =>
+    let _ ← delayed.subscribe fun n =>
       valuesRef.modify (· ++ [n])
 
-    SpiderM.liftIO <| fire 1
-    SpiderM.liftIO <| fire 2
-    SpiderM.liftIO <| fire 3
+    fire 1
+    fire 2
+    fire 3
     SpiderM.liftIO valuesRef.get
 
   shouldBe result [1, 2, 3]
@@ -52,14 +52,14 @@ test "delayFrame breaks immediate feedback" := do
     let delayed ← Event.delayFrameM trigger
 
     let countRef ← SpiderM.liftIO <| IO.mkRef 0
-    let _ ← SpiderM.liftIO <| delayed.subscribe fun n => do
+    let _ ← delayed.subscribe fun n => do
       let count ← countRef.get
       if count < 3 then
         countRef.set (count + 1)
         -- This would cause infinite loop without delay
         fire (n + 1)
 
-    SpiderM.liftIO <| fire 1
+    fire 1
     SpiderM.liftIO countRef.get
 
   shouldBe result 3
@@ -72,10 +72,10 @@ test "delayDuration fires after duration" := do
     let delayed ← Event.delayDurationM (Chronos.Duration.fromMilliseconds 30) trigger
 
     let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
-    let _ ← SpiderM.liftIO <| delayed.subscribe fun n =>
+    let _ ← delayed.subscribe fun n =>
       receivedRef.modify (· ++ [n])
 
-    SpiderM.liftIO <| fire 42
+    fire 42
     -- Wait for delay to complete
     SpiderM.liftIO <| IO.sleep 100
     SpiderM.liftIO receivedRef.get
@@ -88,12 +88,12 @@ test "delayDuration delays independently" := do
     let delayed ← Event.delayDurationM (Chronos.Duration.fromMilliseconds 30) trigger
 
     let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
-    let _ ← SpiderM.liftIO <| delayed.subscribe fun n =>
+    let _ ← delayed.subscribe fun n =>
       receivedRef.modify (· ++ [n])
 
-    SpiderM.liftIO <| fire 1
+    fire 1
     SpiderM.liftIO <| IO.sleep 5  -- Small delay to ensure first task is scheduled
-    SpiderM.liftIO <| fire 2
+    fire 2
     SpiderM.liftIO <| IO.sleep 100
     SpiderM.liftIO receivedRef.get
 
@@ -109,15 +109,15 @@ test "debounce only fires after quiet period" := do
     let debounced ← Event.debounceM (Chronos.Duration.fromMilliseconds 50) trigger
 
     let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
-    let _ ← SpiderM.liftIO <| debounced.subscribe fun n =>
+    let _ ← debounced.subscribe fun n =>
       receivedRef.modify (· ++ [n])
 
     -- Rapid fire sequence
-    SpiderM.liftIO <| fire 1
+    fire 1
     SpiderM.liftIO <| IO.sleep 20
-    SpiderM.liftIO <| fire 2
+    fire 2
     SpiderM.liftIO <| IO.sleep 20
-    SpiderM.liftIO <| fire 3
+    fire 3
     -- Wait for quiet period + buffer
     SpiderM.liftIO <| IO.sleep 100
 
@@ -132,17 +132,17 @@ test "debounce fires for separated bursts" := do
     let debounced ← Event.debounceM (Chronos.Duration.fromMilliseconds 30) trigger
 
     let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
-    let _ ← SpiderM.liftIO <| debounced.subscribe fun n =>
+    let _ ← debounced.subscribe fun n =>
       receivedRef.modify (· ++ [n])
 
     -- First burst
-    SpiderM.liftIO <| fire 1
-    SpiderM.liftIO <| fire 2
+    fire 1
+    fire 2
     SpiderM.liftIO <| IO.sleep 80  -- Wait for first debounce
 
     -- Second burst
-    SpiderM.liftIO <| fire 10
-    SpiderM.liftIO <| fire 20
+    fire 10
+    fire 20
     SpiderM.liftIO <| IO.sleep 80  -- Wait for second debounce
 
     SpiderM.liftIO receivedRef.get
@@ -158,12 +158,12 @@ test "throttle limits fire rate" := do
     let throttled ← Event.throttleM (Chronos.Duration.fromMilliseconds 100) trigger
 
     let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
-    let _ ← SpiderM.liftIO <| throttled.subscribe fun n =>
+    let _ ← throttled.subscribe fun n =>
       receivedRef.modify (· ++ [n])
 
-    SpiderM.liftIO <| fire 1  -- Leading fire (immediate)
-    SpiderM.liftIO <| fire 2  -- In cooldown, stored for trailing
-    SpiderM.liftIO <| fire 3  -- In cooldown, replaces pending trailing
+    fire 1  -- Leading fire (immediate)
+    fire 2  -- In cooldown, stored for trailing
+    fire 3  -- In cooldown, replaces pending trailing
     SpiderM.liftIO <| IO.sleep 150  -- Wait for trailing
 
     SpiderM.liftIO receivedRef.get
@@ -178,12 +178,12 @@ test "throttle leading only" := do
         (leading := true) (trailing := false)
 
     let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
-    let _ ← SpiderM.liftIO <| throttled.subscribe fun n =>
+    let _ ← throttled.subscribe fun n =>
       receivedRef.modify (· ++ [n])
 
-    SpiderM.liftIO <| fire 1  -- Leading fire
-    SpiderM.liftIO <| fire 2  -- Ignored
-    SpiderM.liftIO <| fire 3  -- Ignored
+    fire 1  -- Leading fire
+    fire 2  -- Ignored
+    fire 3  -- Ignored
     SpiderM.liftIO <| IO.sleep 150
 
     SpiderM.liftIO receivedRef.get
@@ -198,12 +198,12 @@ test "throttle trailing only" := do
         (leading := false) (trailing := true)
 
     let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
-    let _ ← SpiderM.liftIO <| throttled.subscribe fun n =>
+    let _ ← throttled.subscribe fun n =>
       receivedRef.modify (· ++ [n])
 
-    SpiderM.liftIO <| fire 1  -- No leading, stored for trailing
-    SpiderM.liftIO <| fire 2  -- Replaces pending
-    SpiderM.liftIO <| fire 3  -- Replaces pending
+    fire 1  -- No leading, stored for trailing
+    fire 2  -- Replaces pending
+    fire 3  -- Replaces pending
     SpiderM.liftIO <| IO.sleep 150
 
     SpiderM.liftIO receivedRef.get
@@ -217,12 +217,12 @@ test "throttle fires after interval" := do
     let throttled ← Event.throttleM (Chronos.Duration.fromMilliseconds 50) trigger
 
     let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
-    let _ ← SpiderM.liftIO <| throttled.subscribe fun n =>
+    let _ ← throttled.subscribe fun n =>
       receivedRef.modify (· ++ [n])
 
-    SpiderM.liftIO <| fire 1  -- Leading
+    fire 1  -- Leading
     SpiderM.liftIO <| IO.sleep 100  -- Wait for interval
-    SpiderM.liftIO <| fire 2  -- Should fire (interval elapsed)
+    fire 2  -- Should fire (interval elapsed)
     SpiderM.liftIO <| IO.sleep 100
 
     SpiderM.liftIO receivedRef.get

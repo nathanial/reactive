@@ -95,7 +95,7 @@ test "Dynamic.current returns a Behavior" := do
 
     let behavior := dyn.current
 
-    liftM (m := IO) <| trigger "updated"
+    trigger "updated"
 
     sample behavior
 
@@ -108,7 +108,7 @@ test "Dynamic.mapM transforms values" := do
     let mapped ← Dynamic.mapM (· * 2) dyn
 
     let v0 ← mapped.sample
-    SpiderM.liftIO <| trigger 5
+    trigger 5
     let v1 ← mapped.sample
     pure (v0, v1)
   shouldBe result (20, 10)

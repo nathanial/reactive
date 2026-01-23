@@ -141,8 +141,8 @@ test "Event.mapM cleans up on scope dispose" := do
     let callCount ← SpiderM.liftIO <| IO.mkRef 0
     let _ ← Event.subscribeM mapped fun _ => callCount.modify (· + 1)
 
-    SpiderM.liftIO <| trigger 1
-    SpiderM.liftIO <| trigger 2
+    trigger 1
+    trigger 2
     SpiderM.liftIO callCount.get
 
   shouldBe result 2
@@ -196,9 +196,9 @@ test "foldDyn cleans up subscription" := do
     let (event, trigger) ← newTriggerEvent (t := Spider) (a := Nat)
     let counter ← foldDyn (fun n acc => acc + n) 0 event
 
-    SpiderM.liftIO <| trigger 1
-    SpiderM.liftIO <| trigger 2
-    SpiderM.liftIO <| trigger 3
+    trigger 1
+    trigger 2
+    trigger 3
 
     SpiderM.liftIO <| counter.sample
 
@@ -221,10 +221,10 @@ test "Multiple combinators chain properly with scope" := do
     -- Fire 2 (doubled=4, passes, accumulated=4)
     -- Fire 3 (doubled=6, not divisible by 4, filtered)
     -- Fire 4 (doubled=8, passes, accumulated=12)
-    SpiderM.liftIO <| trigger 1
-    SpiderM.liftIO <| trigger 2
-    SpiderM.liftIO <| trigger 3
-    SpiderM.liftIO <| trigger 4
+    trigger 1
+    trigger 2
+    trigger 3
+    trigger 4
 
     SpiderM.liftIO values.get
 
@@ -236,7 +236,7 @@ test "Dynamic.mapM cleans up subscription" := do
     let dyn ← holdDyn 0 event
     let doubled ← Dynamic.mapM (· * 2) dyn
 
-    SpiderM.liftIO <| trigger 5
+    trigger 5
     SpiderM.liftIO <| doubled.sample
 
   shouldBe result 10

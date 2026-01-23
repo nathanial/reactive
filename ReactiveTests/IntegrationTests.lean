@@ -93,9 +93,9 @@ test "gas pump accumulates gallons and calculates cost" := do
     let gallonsDyn ← foldDyn (· + ·) 0.0 flowEvent
     let costBehavior := Behavior.zipWith (· * ·) gallonsDyn.current pricePerGallon
 
-    SpiderM.liftIO <| pumpFlow 1.5
-    SpiderM.liftIO <| pumpFlow 2.0
-    SpiderM.liftIO <| pumpFlow 0.5
+    pumpFlow 1.5
+    pumpFlow 2.0
+    pumpFlow 0.5
 
     let totalGallons ← sample gallonsDyn.current
     let totalCost ← sample costBehavior
@@ -119,16 +119,16 @@ test "gas pump stops at prepaid amount" := do
     let actualGallonsDyn ← foldDyn (· + ·) 0.0 gatedFlow
 
     -- Pump 10 times (only first 4 should pass the gate)
-    SpiderM.liftIO <| pumpFlow 1.0
-    SpiderM.liftIO <| pumpFlow 1.0
-    SpiderM.liftIO <| pumpFlow 1.0
-    SpiderM.liftIO <| pumpFlow 1.0
-    SpiderM.liftIO <| pumpFlow 1.0
-    SpiderM.liftIO <| pumpFlow 1.0
-    SpiderM.liftIO <| pumpFlow 1.0
-    SpiderM.liftIO <| pumpFlow 1.0
-    SpiderM.liftIO <| pumpFlow 1.0
-    SpiderM.liftIO <| pumpFlow 1.0
+    pumpFlow 1.0
+    pumpFlow 1.0
+    pumpFlow 1.0
+    pumpFlow 1.0
+    pumpFlow 1.0
+    pumpFlow 1.0
+    pumpFlow 1.0
+    pumpFlow 1.0
+    pumpFlow 1.0
+    pumpFlow 1.0
 
     sample actualGallonsDyn.current
 
@@ -143,12 +143,12 @@ test "gas pump tracks cost in real-time" := do
 
     let costUpdatesRef ← SpiderM.liftIO <| IO.mkRef ([] : List Float)
     let costEvent ← Event.map' gallonsDyn.updated (· * pricePerGallon)
-    let _ ← SpiderM.liftIO <| costEvent.subscribe fun cost =>
+    let _ ← costEvent.subscribe fun cost =>
       costUpdatesRef.modify (· ++ [cost])
 
-    SpiderM.liftIO <| pumpFlow 1.0
-    SpiderM.liftIO <| pumpFlow 1.0
-    SpiderM.liftIO <| pumpFlow 1.0
+    pumpFlow 1.0
+    pumpFlow 1.0
+    pumpFlow 1.0
 
     SpiderM.liftIO costUpdatesRef.get
 
@@ -183,16 +183,16 @@ test "fuel grade selection dynamically switches price behavior" := do
     let costBehavior := Behavior.zipWith (· * ·) gallonsDyn.current priceBehavior
 
     -- Start pumping Regular at $3.50
-    SpiderM.liftIO <| pumpFlow 2.0
+    pumpFlow 2.0
     let cost1 ← sample costBehavior  -- 2.0 * 3.50 = 7.00
 
     -- Switch to Premium mid-transaction!
     -- In real life you can't do this, but it demonstrates dynamic switching
-    SpiderM.liftIO <| selectGrade FuelGrade.premium
+    selectGrade FuelGrade.premium
     let cost2 ← sample costBehavior  -- 2.0 * 4.20 = 8.40 (price changed!)
 
     -- Pump more at Premium price
-    SpiderM.liftIO <| pumpFlow 1.0
+    pumpFlow 1.0
     let cost3 ← sample costBehavior  -- 3.0 * 4.20 = 12.60
 
     pure (cost1, cost2, cost3)
@@ -213,22 +213,22 @@ test "nozzle state gates fuel flow" := do
     let gallonsDyn ← foldDyn (· + ·) 0.0 gatedFlow
 
     -- Try to pump with nozzle down - should be blocked
-    SpiderM.liftIO <| pumpFlow 1.0
+    pumpFlow 1.0
     let g1 ← sample gallonsDyn.current
 
     -- Lift nozzle
-    SpiderM.liftIO <| setNozzle true
+    setNozzle true
 
     -- Now pumping works
-    SpiderM.liftIO <| pumpFlow 2.0
-    SpiderM.liftIO <| pumpFlow 1.5
+    pumpFlow 2.0
+    pumpFlow 1.5
     let g2 ← sample gallonsDyn.current
 
     -- Put nozzle down
-    SpiderM.liftIO <| setNozzle false
+    setNozzle false
 
     -- Blocked again
-    SpiderM.liftIO <| pumpFlow 5.0
+    pumpFlow 5.0
     let g3 ← sample gallonsDyn.current
 
     pure (g1, g2, g3)
@@ -260,20 +260,20 @@ test "compound gating: nozzle up AND under prepaid limit" := do
       foldDyn (· + ·) (0.0 : Float) gatedFlow
 
     -- Nozzle down: blocked
-    SpiderM.liftIO <| pumpFlow 1.0
+    pumpFlow 1.0
     let g1 ← sample gallonsDyn.current
 
     -- Lift nozzle, pump until near limit
-    SpiderM.liftIO <| setNozzle true
-    SpiderM.liftIO <| pumpFlow 2.0  -- $8, passes (cost was 0)
-    SpiderM.liftIO <| pumpFlow 2.0  -- $16, passes (cost was 8)
+    setNozzle true
+    pumpFlow 2.0  -- $8, passes (cost was 0)
+    pumpFlow 2.0  -- $16, passes (cost was 8)
     let g2 ← sample gallonsDyn.current
 
     -- This would put us at $24, blocked (cost is 16 < 20, but 16+8=24 > 20)
     -- Actually: at cost $16, still under $20, so this passes and we hit $24
     -- Then the NEXT one would be blocked
-    SpiderM.liftIO <| pumpFlow 2.0  -- passes, cost becomes $24
-    SpiderM.liftIO <| pumpFlow 2.0  -- blocked, cost $24 >= $20
+    pumpFlow 2.0  -- passes, cost becomes $24
+    pumpFlow 2.0  -- blocked, cost $24 >= $20
     let g3 ← sample gallonsDyn.current
 
     pure (g1, g2, g3)
@@ -312,13 +312,13 @@ test "sale lifecycle state machine" := do
 
     -- Walk through a sale
     let s0 ← sample stateDyn.current  -- Idle
-    SpiderM.liftIO <| dispatch (.selectGrade .premium)
+    dispatch (.selectGrade .premium)
     let s1 ← sample stateDyn.current  -- Ready
-    SpiderM.liftIO <| dispatch (.setNozzle true)
+    dispatch (.setNozzle true)
     let s2 ← sample stateDyn.current  -- Pumping
-    SpiderM.liftIO <| dispatch (.setNozzle false)
+    dispatch (.setNozzle false)
     let s3 ← sample stateDyn.current  -- Complete
-    SpiderM.liftIO <| dispatch .completeSale
+    dispatch .completeSale
     let s4 ← sample stateDyn.current  -- Back to Idle
 
     pure (s0, s1, s2, s3, s4)
@@ -357,18 +357,18 @@ test "full gas pump session with display updates" := do
 
     -- Track all display updates when gallons change
     let displaysRef ← SpiderM.liftIO <| IO.mkRef ([] : List DisplayUpdate)
-    let _ ← SpiderM.liftIO <| gallonsDyn.updated.subscribe fun gallons => do
+    let _ ← gallonsDyn.updated.subscribe fun gallons => do
       let grade ← gradeDyn.current.sample
       let cost ← costBehavior.sample
       let state ← stateBehavior.sample
       displaysRef.modify (· ++ [{ gallons, cost, grade, state }])
 
     -- Full session
-    SpiderM.liftIO <| selectGrade FuelGrade.plus  -- Select Plus ($3.80)
-    SpiderM.liftIO <| setNozzle true               -- Lift nozzle
-    SpiderM.liftIO <| pumpFlow 2.0                 -- Pump 2 gallons
-    SpiderM.liftIO <| pumpFlow 3.0                 -- Pump 3 more
-    SpiderM.liftIO <| setNozzle false              -- Return nozzle
+    selectGrade FuelGrade.plus  -- Select Plus ($3.80)
+    setNozzle true               -- Lift nozzle
+    pumpFlow 2.0                 -- Pump 2 gallons
+    pumpFlow 3.0                 -- Pump 3 more
+    setNozzle false              -- Return nozzle
 
     -- Get final values
     let finalGallons ← sample gallonsDyn.current
@@ -418,13 +418,13 @@ test "form validates individual fields" := do
 
     let v0 ← sample allValid
 
-    SpiderM.liftIO <| setUsername "john_doe"
+    setUsername "john_doe"
     let v1 ← sample allValid
 
-    SpiderM.liftIO <| setEmail "john@example.com"
+    setEmail "john@example.com"
     let v2 ← sample allValid
 
-    SpiderM.liftIO <| setPassword "secretpass123"
+    setPassword "secretpass123"
     let v3 ← sample allValid
 
     pure (v0, v1, v2, v3)
@@ -442,14 +442,14 @@ test "form submit only fires when valid" := do
     let validSubmit ← Event.gateM emailValid submitEvent
 
     let submitsRef ← SpiderM.liftIO <| IO.mkRef (0 : Nat)
-    let _ ← SpiderM.liftIO <| validSubmit.subscribe fun _ =>
+    let _ ← validSubmit.subscribe fun _ =>
       submitsRef.modify (· + 1)
 
-    SpiderM.liftIO <| clickSubmit ()
+    clickSubmit ()
     let s1 ← SpiderM.liftIO submitsRef.get
 
-    SpiderM.liftIO <| setEmail "valid@email.com"
-    SpiderM.liftIO <| clickSubmit ()
+    setEmail "valid@email.com"
+    clickSubmit ()
     let s2 ← SpiderM.liftIO submitsRef.get
 
     pure (s1, s2)
@@ -467,9 +467,9 @@ test "form shows error messages reactively" := do
       else ""
 
     let e0 ← sample errorMessage
-    SpiderM.liftIO <| setEmail "bad"
+    setEmail "bad"
     let e1 ← sample errorMessage
-    SpiderM.liftIO <| setEmail "good@email.com"
+    setEmail "good@email.com"
     let e2 ← sample errorMessage
 
     pure (e0, e1, e2)
@@ -495,9 +495,9 @@ test "bank account tracks balance" := do
       | .withdraw amt => bal - amt
     ) 0.0 txEvent
 
-    SpiderM.liftIO <| submitTx (Transaction.deposit 100.0)
-    SpiderM.liftIO <| submitTx (Transaction.deposit 50.0)
-    SpiderM.liftIO <| submitTx (Transaction.withdraw 30.0)
+    submitTx (Transaction.deposit 100.0)
+    submitTx (Transaction.deposit 50.0)
+    submitTx (Transaction.withdraw 30.0)
 
     sample balanceDyn.current
 
@@ -513,13 +513,13 @@ test "bank account prevents overdraft" := do
       | .withdraw amt => if decide (bal >= amt) then bal - amt else bal
     ) 100.0 txEvent
 
-    SpiderM.liftIO <| submitTx (Transaction.deposit 50.0)
+    submitTx (Transaction.deposit 50.0)
     let b1 ← sample approvedBalanceDyn.current
 
-    SpiderM.liftIO <| submitTx (Transaction.withdraw 30.0)
+    submitTx (Transaction.withdraw 30.0)
     let b2 ← sample approvedBalanceDyn.current
 
-    SpiderM.liftIO <| submitTx (Transaction.withdraw 200.0)
+    submitTx (Transaction.withdraw 200.0)
     let b3 ← sample approvedBalanceDyn.current
 
     pure (b1, b2, b3)
@@ -532,9 +532,9 @@ test "bank account maintains transaction history" := do
 
     let historyDyn ← foldDyn (fun tx history => tx :: history) [] txEvent
 
-    SpiderM.liftIO <| submitTx (Transaction.deposit 100.0)
-    SpiderM.liftIO <| submitTx (Transaction.withdraw 25.0)
-    SpiderM.liftIO <| submitTx (Transaction.deposit 50.0)
+    submitTx (Transaction.deposit 100.0)
+    submitTx (Transaction.withdraw 25.0)
+    submitTx (Transaction.deposit 50.0)
 
     let history ← sample historyDyn.current
     pure history.length
@@ -579,9 +579,9 @@ test "shopping cart calculates total" := do
     let subtotal := cartDyn.current.map fun items =>
       items.foldl (fun acc item => acc + item.price * item.quantity.toFloat) 0.0
 
-    SpiderM.liftIO <| dispatch (.addItem "Widget" 10.0)
-    SpiderM.liftIO <| dispatch (.addItem "Gadget" 25.0)
-    SpiderM.liftIO <| dispatch (.addItem "Widget" 10.0)
+    dispatch (.addItem "Widget" 10.0)
+    dispatch (.addItem "Gadget" 25.0)
+    dispatch (.addItem "Widget" 10.0)
 
     sample subtotal
 
@@ -608,10 +608,10 @@ test "shopping cart applies discount" := do
 
     let finalTotal := Behavior.zipWith (fun sub disc => sub * (1.0 - disc)) subtotal discountDyn.current
 
-    SpiderM.liftIO <| dispatch (.addItem "Expensive Thing" 100.0)
+    dispatch (.addItem "Expensive Thing" 100.0)
     let t1 ← sample finalTotal
 
-    SpiderM.liftIO <| dispatch (.applyDiscount 0.20)
+    dispatch (.applyDiscount 0.20)
     let t2 ← sample finalTotal
 
     pure (t1, t2)
@@ -634,14 +634,14 @@ test "shopping cart updates quantities" := do
     let itemCount := cartDyn.current.map fun items =>
       items.foldl (fun acc item => acc + item.quantity) 0
 
-    SpiderM.liftIO <| dispatch (.addItem "Apple" 1.0)
-    SpiderM.liftIO <| dispatch (.addItem "Banana" 0.50)
+    dispatch (.addItem "Apple" 1.0)
+    dispatch (.addItem "Banana" 0.50)
     let c1 ← sample itemCount
 
-    SpiderM.liftIO <| dispatch (.updateQuantity "Apple" 5)
+    dispatch (.updateQuantity "Apple" 5)
     let c2 ← sample itemCount
 
-    SpiderM.liftIO <| dispatch (.updateQuantity "Banana" 0)
+    dispatch (.updateQuantity "Banana" 0)
     let c3 ← sample itemCount
 
     pure (c1, c2, c3)
@@ -666,8 +666,8 @@ test "shopping cart calculates tax" := do
     let tax := subtotal.map (· * taxRate)
     let total := Behavior.zipWith (· + ·) subtotal tax
 
-    SpiderM.liftIO <| dispatch (.addItem "Book" 20.0)
-    SpiderM.liftIO <| dispatch (.addItem "Pen" 5.0)
+    dispatch (.addItem "Book" 20.0)
+    dispatch (.addItem "Pen" 5.0)
 
     let sub ← sample subtotal
     let t ← sample tax

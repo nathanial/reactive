@@ -21,26 +21,26 @@ test "switchDyn switches to new event when dynamic changes" := do
 
     -- Create switched event
     let nodeId ← SpiderM.freshNodeId
-    let switched ← SpiderM.liftIO <| switchDynWithId dynEvent nodeId
+    let switched ← switchDynWithId dynEvent nodeId
 
     -- Collect fired values
     let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
-    let _ ← SpiderM.liftIO <| switched.subscribe fun n =>
+    let _ ← switched.subscribe fun n =>
       receivedRef.modify (· ++ [n])
 
     -- Fire e1
-    SpiderM.liftIO <| t1 1
-    SpiderM.liftIO <| t1 2
+    t1 1
+    t1 2
 
     -- Switch to e2
-    SpiderM.liftIO <| switchTrigger e2
+    switchTrigger e2
 
     -- Fire e1 (should be ignored now)
-    SpiderM.liftIO <| t1 999
+    t1 999
 
     -- Fire e2 (should be received)
-    SpiderM.liftIO <| t2 3
-    SpiderM.liftIO <| t2 4
+    t2 3
+    t2 4
 
     SpiderM.liftIO receivedRef.get
 
@@ -60,26 +60,26 @@ test "switchDynamic propagates inner dynamic changes" := do
 
     -- Create switched dynamic
     let nodeId ← SpiderM.freshNodeId
-    let switched ← SpiderM.liftIO <| switchDynamicWithId outer nodeId
+    let switched ← switchDynamicWithId outer nodeId
 
     -- Check initial value
-    let v0 ← SpiderM.liftIO <| switched.sample
+    let v0 ← switched.sample
 
     -- Update inner1
-    SpiderM.liftIO <| t1 15
-    let v1 ← SpiderM.liftIO <| switched.sample
+    t1 15
+    let v1 ← switched.sample
 
     -- Switch to inner2
-    SpiderM.liftIO <| switchTrigger inner2
-    let v2 ← SpiderM.liftIO <| switched.sample
+    switchTrigger inner2
+    let v2 ← switched.sample
 
     -- Update inner2
-    SpiderM.liftIO <| t2 25
-    let v3 ← SpiderM.liftIO <| switched.sample
+    t2 25
+    let v3 ← switched.sample
 
     -- Update inner1 (should be ignored now)
-    SpiderM.liftIO <| t1 999
-    let v4 ← SpiderM.liftIO <| switched.sample
+    t1 999
+    let v4 ← switched.sample
 
     pure (v0, v1, v2, v3, v4)
 
@@ -96,17 +96,17 @@ test "switchDynamic fires update events" := do
     let outer ← holdDyn inner1 switchEvent
 
     let nodeId ← SpiderM.freshNodeId
-    let switched ← SpiderM.liftIO <| switchDynamicWithId outer nodeId
+    let switched ← switchDynamicWithId outer nodeId
 
     -- Track update events
     let updatesRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
-    let _ ← SpiderM.liftIO <| switched.updated.subscribe fun n =>
+    let _ ← switched.updated.subscribe fun n =>
       updatesRef.modify (· ++ [n])
 
     -- Trigger changes
-    SpiderM.liftIO <| t1 15           -- inner1 change
-    SpiderM.liftIO <| switchTrigger inner2  -- switch to inner2
-    SpiderM.liftIO <| t2 25           -- inner2 change
+    t1 15           -- inner1 change
+    switchTrigger inner2  -- switch to inner2
+    t2 25           -- inner2 change
 
     SpiderM.liftIO updatesRef.get
 
@@ -119,16 +119,16 @@ test "switchHold switches on event occurrence" := do
     let (switchEvent, switchTrigger) ← newTriggerEvent (t := Spider) (a := Event Spider Nat)
 
     let nodeId ← SpiderM.freshNodeId
-    let switched ← SpiderM.liftIO <| switchHoldWithId e1 switchEvent nodeId
+    let switched ← switchHoldWithId e1 switchEvent nodeId
 
     let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
-    let _ ← SpiderM.liftIO <| switched.subscribe fun n =>
+    let _ ← switched.subscribe fun n =>
       receivedRef.modify (· ++ [n])
 
-    SpiderM.liftIO <| t1 1
-    SpiderM.liftIO <| switchTrigger e2
-    SpiderM.liftIO <| t1 999  -- ignored
-    SpiderM.liftIO <| t2 2
+    t1 1
+    switchTrigger e2
+    t1 999  -- ignored
+    t2 2
 
     SpiderM.liftIO receivedRef.get
 
@@ -145,7 +145,7 @@ test "switchBehavior samples inner behavior" := do
     let switched := switchBehavior outer.current
 
     let v0 ← sample switched
-    SpiderM.liftIO <| switchTrigger b2
+    switchTrigger b2
     let v1 ← sample switched
 
     pure (v0, v1)
@@ -165,13 +165,13 @@ test "Dynamic.switchM propagates inner dynamic changes with scope" := do
     -- Use new SpiderM wrapper
     let switched ← Dynamic.switchM outer
 
-    let v0 ← SpiderM.liftIO <| switched.sample
-    SpiderM.liftIO <| t1 15
-    let v1 ← SpiderM.liftIO <| switched.sample
-    SpiderM.liftIO <| switchTrigger inner2
-    let v2 ← SpiderM.liftIO <| switched.sample
-    SpiderM.liftIO <| t2 25
-    let v3 ← SpiderM.liftIO <| switched.sample
+    let v0 ← switched.sample
+    t1 15
+    let v1 ← switched.sample
+    switchTrigger inner2
+    let v2 ← switched.sample
+    t2 25
+    let v3 ← switched.sample
 
     pure (v0, v1, v2, v3)
 
@@ -192,11 +192,11 @@ test "Event.switchDynM switches events with scope" := do
     let _ ← Event.subscribeM switched fun n =>
       receivedRef.modify (· ++ [n])
 
-    SpiderM.liftIO <| t1 1
-    SpiderM.liftIO <| t1 2
-    SpiderM.liftIO <| switchTrigger e2
-    SpiderM.liftIO <| t1 999  -- ignored
-    SpiderM.liftIO <| t2 3
+    t1 1
+    t1 2
+    switchTrigger e2
+    t1 999  -- ignored
+    t2 3
 
     SpiderM.liftIO receivedRef.get
 

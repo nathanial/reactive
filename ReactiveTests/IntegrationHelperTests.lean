@@ -14,12 +14,12 @@ test "fromRef creates event from ref updates" := do
     let (event, update, ref) ← fromRef (0 : Nat)
 
     let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
-    let _ ← SpiderM.liftIO <| event.subscribe fun n =>
+    let _ ← event.subscribe fun n =>
       receivedRef.modify (· ++ [n])
 
-    SpiderM.liftIO <| update 10
-    SpiderM.liftIO <| update 20
-    SpiderM.liftIO <| update 30
+    update 10
+    update 20
+    update 30
 
     SpiderM.liftIO receivedRef.get
   shouldBe result [10, 20, 30]
@@ -29,9 +29,9 @@ test "fromRef returns correct ref for reading" := do
     let (_, update, ref) ← fromRef (0 : Nat)
 
     let v0 ← SpiderM.liftIO ref.get
-    SpiderM.liftIO <| update 42
+    update 42
     let v1 ← SpiderM.liftIO ref.get
-    SpiderM.liftIO <| update 100
+    update 100
     let v2 ← SpiderM.liftIO ref.get
 
     pure (v0, v1, v2)
@@ -42,11 +42,11 @@ test "fromRefWithBehavior provides both event and behavior" := do
     let (event, behavior, update) ← fromRefWithBehavior "initial"
 
     let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List String)
-    let _ ← SpiderM.liftIO <| event.subscribe fun s =>
+    let _ ← event.subscribe fun s =>
       receivedRef.modify (· ++ [s])
 
     let b0 ← behavior.sample
-    SpiderM.liftIO <| update "updated"
+    update "updated"
     let b1 ← behavior.sample
 
     let events ← SpiderM.liftIO receivedRef.get
@@ -62,9 +62,9 @@ test "toCallback exports event as callback function" := do
     toCallback event fun n => callbackRef.modify (· ++ [n])
 
     -- Fire the event
-    SpiderM.liftIO <| trigger 1
-    SpiderM.liftIO <| trigger 2
-    SpiderM.liftIO <| trigger 3
+    trigger 1
+    trigger 2
+    trigger 3
 
     SpiderM.liftIO callbackRef.get
   shouldBe result [1, 2, 3]
@@ -74,13 +74,13 @@ test "fromRef event fires on each update" := do
     let (event, update, _) ← fromRef (0 : Nat)
 
     let countRef ← SpiderM.liftIO <| IO.mkRef (0 : Nat)
-    let _ ← SpiderM.liftIO <| event.subscribe fun _ =>
+    let _ ← event.subscribe fun _ =>
       countRef.modify (· + 1)
 
-    SpiderM.liftIO <| update 1
-    SpiderM.liftIO <| update 1  -- Same value still fires
-    SpiderM.liftIO <| update 1
-    SpiderM.liftIO <| update 2
+    update 1
+    update 1  -- Same value still fires
+    update 1
+    update 2
 
     SpiderM.liftIO countRef.get
   shouldBe result 4
@@ -93,11 +93,11 @@ test "fromRefWithBehavior behavior always returns current value" := do
     let v0 ← behavior.sample
     SpiderM.liftIO <| (samples.modify (· ++ [v0]))
 
-    SpiderM.liftIO <| update 200
+    update 200
     let v1 ← behavior.sample
     SpiderM.liftIO <| (samples.modify (· ++ [v1]))
 
-    SpiderM.liftIO <| update 300
+    update 300
     let v2 ← behavior.sample
     SpiderM.liftIO <| (samples.modify (· ++ [v2]))
 

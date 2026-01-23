@@ -31,7 +31,7 @@ def buildDeepChain (source : Event Spider Nat) (depth : Nat) : SpiderM (Event Sp
 def addCountingSubscribers (event : Event Spider Nat) (n : Nat)
     (countRef : IO.Ref Nat) : SpiderM Unit := do
   for _ in [:n] do
-    let _ ← SpiderM.liftIO <| event.subscribe fun _ =>
+    let _ ← event.subscribe fun _ =>
       countRef.modify (· + 1)
 
 /-- Fire a trigger N times with consecutive values 0..N-1. -/
@@ -51,7 +51,7 @@ test "perf: wide fan-out with 1000 subscribers, 100 fires" := do
 
     -- Time 100 fires
     let start ← SpiderM.liftIO Chronos.MonotonicTime.now
-    SpiderM.liftIO <| fireNTimes trigger 100
+    fireNTimes trigger 100
     let elapsed ← SpiderM.liftIO start.elapsed
 
     let count ← SpiderM.liftIO countRef.get
@@ -71,7 +71,7 @@ test "perf: wide fan-out with 5000 subscribers, 10 fires" := do
 
     -- Time 10 fires
     let start ← SpiderM.liftIO Chronos.MonotonicTime.now
-    SpiderM.liftIO <| fireNTimes trigger 10
+    fireNTimes trigger 10
     let elapsed ← SpiderM.liftIO start.elapsed
 
     let count ← SpiderM.liftIO countRef.get
@@ -92,13 +92,13 @@ test "perf: deep chain with 1000 map operations, 100 fires" := do
 
     let receivedRef ← SpiderM.liftIO <| IO.mkRef (0 : Nat)
     let countRef ← SpiderM.liftIO <| IO.mkRef (0 : Nat)
-    let _ ← SpiderM.liftIO <| deepEvent.subscribe fun n => do
+    let _ ← deepEvent.subscribe fun n => do
       receivedRef.set n
       countRef.modify (· + 1)
 
     -- Time 100 fires through the deep chain
     let start ← SpiderM.liftIO Chronos.MonotonicTime.now
-    SpiderM.liftIO <| fireNTimes trigger 100
+    fireNTimes trigger 100
     let elapsed ← SpiderM.liftIO start.elapsed
 
     let finalValue ← SpiderM.liftIO receivedRef.get
@@ -119,13 +119,13 @@ test "perf: deep chain with 2000 map operations, 50 fires" := do
 
     let receivedRef ← SpiderM.liftIO <| IO.mkRef (0 : Nat)
     let countRef ← SpiderM.liftIO <| IO.mkRef (0 : Nat)
-    let _ ← SpiderM.liftIO <| deepEvent.subscribe fun n => do
+    let _ ← deepEvent.subscribe fun n => do
       receivedRef.set n
       countRef.modify (· + 1)
 
     -- Time 50 fires
     let start ← SpiderM.liftIO Chronos.MonotonicTime.now
-    SpiderM.liftIO <| fireNTimes trigger 50
+    fireNTimes trigger 50
     let elapsed ← SpiderM.liftIO start.elapsed
 
     let finalValue ← SpiderM.liftIO receivedRef.get
@@ -143,11 +143,11 @@ test "perf: rapid firing 10000 events" := do
   let result ← runSpider do
     let (event, trigger) ← newTriggerEvent (t := Spider) (a := Nat)
     let countRef ← SpiderM.liftIO <| IO.mkRef (0 : Nat)
-    let _ ← SpiderM.liftIO <| event.subscribe fun _ =>
+    let _ ← event.subscribe fun _ =>
       countRef.modify (· + 1)
 
     let start ← SpiderM.liftIO Chronos.MonotonicTime.now
-    SpiderM.liftIO <| fireNTimes trigger 10000
+    fireNTimes trigger 10000
     let elapsed ← SpiderM.liftIO start.elapsed
 
     let count ← SpiderM.liftIO countRef.get
@@ -173,12 +173,12 @@ test "perf: 100-branch diamond pattern, 100 fires" := do
 
     let batchCountRef ← SpiderM.liftIO <| IO.mkRef (0 : Nat)
     let totalValuesRef ← SpiderM.liftIO <| IO.mkRef (0 : Nat)
-    let _ ← SpiderM.liftIO <| merged.subscribe fun batch => do
+    let _ ← merged.subscribe fun batch => do
       batchCountRef.modify (· + 1)
       totalValuesRef.modify (· + batch.length)
 
     let start ← SpiderM.liftIO Chronos.MonotonicTime.now
-    SpiderM.liftIO <| fireNTimes trigger 100
+    fireNTimes trigger 100
     let elapsed ← SpiderM.liftIO start.elapsed
 
     let batches ← SpiderM.liftIO batchCountRef.get
@@ -204,11 +204,11 @@ test "perf: 200-branch diamond pattern, 50 fires" := do
     let merged ← Event.mergeListM branches.toList
 
     let totalValuesRef ← SpiderM.liftIO <| IO.mkRef (0 : Nat)
-    let _ ← SpiderM.liftIO <| merged.subscribe fun batch =>
+    let _ ← merged.subscribe fun batch =>
       totalValuesRef.modify (· + batch.length)
 
     let start ← SpiderM.liftIO Chronos.MonotonicTime.now
-    SpiderM.liftIO <| fireNTimes trigger 50
+    fireNTimes trigger 50
     let elapsed ← SpiderM.liftIO start.elapsed
 
     let totalValues ← SpiderM.liftIO totalValuesRef.get
@@ -236,11 +236,11 @@ test "perf: mixed wide and deep network (500 chains x 1000 depth x 200 subscribe
     let countRef ← SpiderM.liftIO <| IO.mkRef (0 : Nat)
     for endpoint in endpoints do
       for _ in [:200] do
-        let _ ← SpiderM.liftIO <| endpoint.subscribe fun _ =>
+        let _ ← endpoint.subscribe fun _ =>
           countRef.modify (· + 1)
 
     let start ← SpiderM.liftIO Chronos.MonotonicTime.now
-    SpiderM.liftIO <| fireNTimes trigger 100
+    fireNTimes trigger 100
     let elapsed ← SpiderM.liftIO start.elapsed
 
     let count ← SpiderM.liftIO countRef.get
@@ -285,8 +285,8 @@ test "perf: switch combinator with 500 switch cycles" := do
       let eventIdx := i % 10
       match events[eventIdx]?, fires[eventIdx]? with
       | some event, some fire => do
-        SpiderM.liftIO <| switchTrigger event
-        SpiderM.liftIO <| fire i
+        switchTrigger event
+        fire i
       | _, _ => pure ()
 
     let elapsed ← SpiderM.liftIO start.elapsed
@@ -307,14 +307,14 @@ test "perf: large propagation queue (100 simultaneous sources)" := do
 
     for _ in [:100] do
       let (event, trigger) ← newTriggerEvent (t := Spider) (a := Nat)
-      let _ ← SpiderM.liftIO <| event.subscribe fun _ =>
+      let _ ← event.subscribe fun _ =>
         countRef.modify (· + 1)
       triggers := triggers.push trigger
 
     -- Create a master event that triggers all 100 sources
     let (master, fireMaster) ← newTriggerEvent (t := Spider) (a := Unit)
     let triggersCapture := triggers
-    let _ ← SpiderM.liftIO <| master.subscribe fun _ => do
+    let _ ← master.subscribe fun _ => do
       for i in [:triggersCapture.size] do
         match triggersCapture[i]? with
         | some t => t i
@@ -323,7 +323,7 @@ test "perf: large propagation queue (100 simultaneous sources)" := do
     let start ← SpiderM.liftIO Chronos.MonotonicTime.now
     -- Fire master 100 times, each cascading to 100 sub-fires
     for _ in [:100] do
-      SpiderM.liftIO <| fireMaster ()
+      fireMaster ()
     let elapsed ← SpiderM.liftIO start.elapsed
 
     let count ← SpiderM.liftIO countRef.get
@@ -358,7 +358,7 @@ test "perf: switchDynamic with 100 inner dynamics, 500 switches" := do
 
     -- Track update count
     let updateCountRef ← SpiderM.liftIO <| IO.mkRef (0 : Nat)
-    let _ ← SpiderM.liftIO <| switched.updated.subscribe fun _ =>
+    let _ ← switched.updated.subscribe fun _ =>
       updateCountRef.modify (· + 1)
 
     let start ← SpiderM.liftIO Chronos.MonotonicTime.now
@@ -368,8 +368,8 @@ test "perf: switchDynamic with 100 inner dynamics, 500 switches" := do
       let idx := i % 100
       match innerDyns[idx]?, innerFires[idx]? with
       | some dyn, some fire => do
-        SpiderM.liftIO <| switchTrigger dyn
-        SpiderM.liftIO <| fire (i * 10)
+        switchTrigger dyn
+        fire (i * 10)
       | _, _ => pure ()
 
     let elapsed ← SpiderM.liftIO start.elapsed
@@ -395,7 +395,7 @@ test "perf: nested dynamics with rapid inner updates (1000 updates)" := do
 
     let updateCountRef ← SpiderM.liftIO <| IO.mkRef (0 : Nat)
     let lastValueRef ← SpiderM.liftIO <| IO.mkRef (0 : Nat)
-    let _ ← SpiderM.liftIO <| switched.updated.subscribe fun n => do
+    let _ ← switched.updated.subscribe fun n => do
       updateCountRef.modify (· + 1)
       lastValueRef.set n
 
@@ -403,7 +403,7 @@ test "perf: nested dynamics with rapid inner updates (1000 updates)" := do
 
     -- Rapidly update the inner dynamic 1000 times
     for i in [:1000] do
-      SpiderM.liftIO <| innerTrigger i
+      innerTrigger i
 
     let elapsed ← SpiderM.liftIO start.elapsed
     let updateCount ← SpiderM.liftIO updateCountRef.get
@@ -428,14 +428,14 @@ test "perf: deeply nested dynamics (10 levels)" := do
       current ← SpiderM.liftIO <| switchDynamicWithId wrapped nodeId
 
     let updateCountRef ← SpiderM.liftIO <| IO.mkRef (0 : Nat)
-    let _ ← SpiderM.liftIO <| current.updated.subscribe fun _ =>
+    let _ ← current.updated.subscribe fun _ =>
       updateCountRef.modify (· + 1)
 
     let start ← SpiderM.liftIO Chronos.MonotonicTime.now
 
     -- Fire 100 updates through all 10 levels
     for i in [:100] do
-      SpiderM.liftIO <| coreTrigger i
+      coreTrigger i
 
     let elapsed ← SpiderM.liftIO start.elapsed
     let updateCount ← SpiderM.liftIO updateCountRef.get
@@ -468,7 +468,7 @@ test "perf: switchDynamic with frequent outer and inner changes" := do
     let switched ← SpiderM.liftIO <| switchDynamicWithId outer nodeId
 
     let updateCountRef ← SpiderM.liftIO <| IO.mkRef (0 : Nat)
-    let _ ← SpiderM.liftIO <| switched.updated.subscribe fun _ =>
+    let _ ← switched.updated.subscribe fun _ =>
       updateCountRef.modify (· + 1)
 
     -- Track which inner is currently selected
@@ -483,13 +483,13 @@ test "perf: switchDynamic with frequent outer and inner changes" := do
       if i % 2 == 0 then
         match innerDyns[switchIdx]? with
         | some dyn => do
-          SpiderM.liftIO <| switchTrigger dyn
+          switchTrigger dyn
           SpiderM.liftIO <| currentIdxRef.set switchIdx
         | none => pure ()
       -- Update the currently selected inner (so it propagates)
       let currentIdx ← SpiderM.liftIO currentIdxRef.get
       match innerFires[currentIdx]? with
-      | some fire => SpiderM.liftIO <| fire i
+      | some fire => fire i
       | none => pure ()
 
     let elapsed ← SpiderM.liftIO start.elapsed
@@ -511,10 +511,10 @@ test "perf: rapid subscribe/unsubscribe cycles (1000 cycles)" := do
 
     -- 1000 cycles of: subscribe, fire, unsubscribe
     for i in [:1000] do
-      let unsub ← SpiderM.liftIO <| event.subscribe fun _ =>
+      let unsub ← event.subscribe fun _ =>
         countRef.modify (· + 1)
-      SpiderM.liftIO <| trigger i
-      SpiderM.liftIO unsub
+      trigger i
+      unsub
 
     let elapsed ← SpiderM.liftIO start.elapsed
     let count ← SpiderM.liftIO countRef.get
@@ -532,7 +532,7 @@ test "perf: many subscribers with interleaved unsubscribe (500 subs, 250 unsubs)
     -- Subscribe 500, keeping unsubscribe actions
     let mut unsubs : Array (IO Unit) := #[]
     for _ in [:500] do
-      let unsub ← SpiderM.liftIO <| event.subscribe fun _ =>
+      let unsub ← event.subscribe fun _ =>
         countRef.modify (· + 1)
       unsubs := unsubs.push unsub
 
@@ -541,11 +541,11 @@ test "perf: many subscribers with interleaved unsubscribe (500 subs, 250 unsubs)
     -- Unsubscribe every other one (250 unsubscribes)
     for i in [:250] do
       match unsubs[i * 2]? with
-      | some unsub => SpiderM.liftIO unsub
+      | some unsub => unsub
       | none => pure ()
 
     -- Fire 100 times with remaining 250 subscribers
-    SpiderM.liftIO <| fireNTimes trigger 100
+    fireNTimes trigger 100
 
     let elapsed ← SpiderM.liftIO start.elapsed
     let count ← SpiderM.liftIO countRef.get
@@ -576,14 +576,14 @@ test "perf: 1000 Dynamic.mapM from single source, 60 updates (simulating 60fps)"
     -- Subscribe to all derived dynamics' updated events (like dynWidget does)
     let updateCountRef ← SpiderM.liftIO <| IO.mkRef (0 : Nat)
     for dyn in derivedDyns do
-      let _ ← SpiderM.liftIO <| dyn.updated.subscribe fun _ =>
+      let _ ← dyn.updated.subscribe fun _ =>
         updateCountRef.modify (· + 1)
 
     -- Simulate 60 frames of animation
     let start ← SpiderM.liftIO Chronos.MonotonicTime.now
     for frame in [:60] do
       let t := frame.toFloat * (1.0 / 60.0)  -- 60fps timing
-      SpiderM.liftIO <| fireSource t
+      fireSource t
     let elapsed ← SpiderM.liftIO start.elapsed
 
     let updateCount ← SpiderM.liftIO updateCountRef.get
@@ -621,13 +621,13 @@ test "perf: baseline - 1000 subscribers, minimal callback (just increment)" := d
 
     -- Add 1000 subscribers with minimal work
     for _ in [:1000] do
-      let _ ← SpiderM.liftIO <| event.subscribe fun _ =>
+      let _ ← event.subscribe fun _ =>
         countRef.modify (· + 1)
 
     -- Time 60 fires
     let start ← SpiderM.liftIO Chronos.MonotonicTime.now
     for frame in [:60] do
-      SpiderM.liftIO <| trigger (frame.toFloat / 60.0)
+      trigger (frame.toFloat / 60.0)
     let elapsed ← SpiderM.liftIO start.elapsed
 
     let count ← SpiderM.liftIO countRef.get
@@ -644,14 +644,14 @@ test "perf: with IO.Ref get/set - 1000 subscribers with value storage" := do
     let countRef ← SpiderM.liftIO <| IO.mkRef (0 : Nat)
     for _ in [:1000] do
       let ref ← SpiderM.liftIO <| IO.mkRef 0.0
-      let _ ← SpiderM.liftIO <| event.subscribe fun v => do
+      let _ ← event.subscribe fun v => do
         let old ← ref.get
         ref.set (old + v)
         countRef.modify (· + 1)
 
     let start ← SpiderM.liftIO Chronos.MonotonicTime.now
     for frame in [:60] do
-      SpiderM.liftIO <| trigger (frame.toFloat / 60.0)
+      trigger (frame.toFloat / 60.0)
     let elapsed ← SpiderM.liftIO start.elapsed
 
     let count ← SpiderM.liftIO countRef.get
@@ -669,15 +669,15 @@ test "perf: with downstream trigger - 1000 subscribers each firing derived event
     for _ in [:1000] do
       let (derivedEvent, fireDerived) ← newTriggerEvent (t := Spider) (a := Float)
       -- Subscribe to source, fire derived
-      let _ ← SpiderM.liftIO <| sourceEvent.subscribe fun v =>
+      let _ ← sourceEvent.subscribe fun v =>
         fireDerived v
       -- Subscribe to derived to count
-      let _ ← SpiderM.liftIO <| derivedEvent.subscribe fun _ =>
+      let _ ← derivedEvent.subscribe fun _ =>
         countRef.modify (· + 1)
 
     let start ← SpiderM.liftIO Chronos.MonotonicTime.now
     for frame in [:60] do
-      SpiderM.liftIO <| trigger (frame.toFloat / 60.0)
+      trigger (frame.toFloat / 60.0)
     let elapsed ← SpiderM.liftIO start.elapsed
 
     let count ← SpiderM.liftIO countRef.get
@@ -699,18 +699,18 @@ test "perf: full Dynamic.mapM pattern breakdown" := do
       let (derivedEvent, fireDerived) ← newTriggerEvent (t := Spider) (a := Float)
 
       -- Subscribe to source (what Dynamic.mapM does internally)
-      let _ ← SpiderM.liftIO <| sourceDyn.updated.subscribe fun v => do
+      let _ ← sourceDyn.updated.subscribe fun v => do
         let newVal := v * 0.5  -- map function
         ref.set newVal
         fireDerived newVal
 
       -- Subscribe to derived event's updated (like dynWidget does)
-      let _ ← SpiderM.liftIO <| derivedEvent.subscribe fun _ =>
+      let _ ← derivedEvent.subscribe fun _ =>
         countRef.modify (· + 1)
 
     let start ← SpiderM.liftIO Chronos.MonotonicTime.now
     for frame in [:60] do
-      SpiderM.liftIO <| fireSource (frame.toFloat / 60.0)
+      fireSource (frame.toFloat / 60.0)
     let elapsed ← SpiderM.liftIO start.elapsed
 
     let count ← SpiderM.liftIO countRef.get
@@ -741,13 +741,13 @@ test "perf: single subscription fan-out approach (baseline comparison)" := do
 
     -- Single subscription that fans out to all callbacks
     let cbs ← SpiderM.liftIO callbacks.get
-    let _ ← SpiderM.liftIO <| sourceDyn.updated.subscribe fun v => do
+    let _ ← sourceDyn.updated.subscribe fun v => do
       for cb in cbs do
         cb v
 
     let start ← SpiderM.liftIO Chronos.MonotonicTime.now
     for frame in [:60] do
-      SpiderM.liftIO <| fireSource (frame.toFloat / 60.0)
+      fireSource (frame.toFloat / 60.0)
     let elapsed ← SpiderM.liftIO start.elapsed
 
     let count ← SpiderM.liftIO countRef.get
@@ -791,13 +791,13 @@ test "micro: FRP Event.subscribe overhead (1000 subs to same event)" := do
     -- Subscribe 1000 callbacks to the SAME event
     for _ in [:1000] do
       let ref ← SpiderM.liftIO <| IO.mkRef 0.0
-      let _ ← SpiderM.liftIO <| event.subscribe fun v => do
+      let _ ← event.subscribe fun v => do
         ref.set v
         countRef.modify (· + 1)
 
     let start ← SpiderM.liftIO Chronos.MonotonicTime.now
     for frame in [:60] do
-      SpiderM.liftIO <| fire (frame.toFloat / 60.0)
+      fire (frame.toFloat / 60.0)
     let elapsed ← SpiderM.liftIO start.elapsed
 
     let count ← SpiderM.liftIO countRef.get

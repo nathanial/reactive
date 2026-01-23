@@ -22,7 +22,7 @@ test "runWithReplaceM fires result event on replacement" := do
     let (initial, resultEvent) ← SpiderM.runWithReplaceM (pure 1 : SpiderM Nat) replaceEvent
 
     let resultsRef ← SpiderM.liftIO <| IO.mkRef [initial]
-    let _ ← SpiderM.liftIO <| resultEvent.subscribe fun n =>
+    let _ ← resultEvent.subscribe fun n =>
       resultsRef.modify (· ++ [n])
 
     triggerReplace (pure 2)
@@ -44,7 +44,7 @@ test "runWithReplaceRequester basic" := do
     let (initial, resultEvent) ← runWithReplaceRequester computation
 
     let resultsRef ← SpiderM.liftIO <| IO.mkRef [initial]
-    let _ ← SpiderM.liftIO <| resultEvent.subscribe fun n =>
+    let _ ← resultEvent.subscribe fun n =>
       resultsRef.modify (· ++ [n])
 
     triggerReplace (pure 100)
@@ -129,7 +129,7 @@ test "traverseDynList incremental - disposes removed items" := do
     let f : Nat → SpiderM Nat := fun n => do
       -- Create a subscription that logs when disposed
       let (evt, _) ← newTriggerEvent (t := Spider) (a := Unit)
-      let _ ← SpiderM.liftIO <| evt.subscribe fun _ => pure ()
+      let _ ← evt.subscribe fun _ => pure ()
       -- Register cleanup action to track disposal
       let scope ← SpiderM.getScope
       SpiderM.liftIO <| scope.register do

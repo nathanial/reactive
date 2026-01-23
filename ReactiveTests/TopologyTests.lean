@@ -24,11 +24,11 @@ test "fan-out: one source to multiple derived events" := do
     let tripledRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
     let squaredRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
 
-    let _ ← SpiderM.liftIO <| doubled.subscribe fun n => doubledRef.modify (· ++ [n])
-    let _ ← SpiderM.liftIO <| tripled.subscribe fun n => tripledRef.modify (· ++ [n])
-    let _ ← SpiderM.liftIO <| squared.subscribe fun n => squaredRef.modify (· ++ [n])
+    let _ ← doubled.subscribe fun n => doubledRef.modify (· ++ [n])
+    let _ ← tripled.subscribe fun n => tripledRef.modify (· ++ [n])
+    let _ ← squared.subscribe fun n => squaredRef.modify (· ++ [n])
 
-    SpiderM.liftIO <| trigger 5
+    trigger 5
     let d ← SpiderM.liftIO doubledRef.get
     let t ← SpiderM.liftIO tripledRef.get
     let s ← SpiderM.liftIO squaredRef.get
@@ -47,12 +47,12 @@ test "fan-out with filtering branches" := do
     let oddsRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
     let div3Ref ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
 
-    let _ ← SpiderM.liftIO <| evens.subscribe fun n => evensRef.modify (· ++ [n])
-    let _ ← SpiderM.liftIO <| odds.subscribe fun n => oddsRef.modify (· ++ [n])
-    let _ ← SpiderM.liftIO <| divisibleBy3.subscribe fun n => div3Ref.modify (· ++ [n])
+    let _ ← evens.subscribe fun n => evensRef.modify (· ++ [n])
+    let _ ← odds.subscribe fun n => oddsRef.modify (· ++ [n])
+    let _ ← divisibleBy3.subscribe fun n => div3Ref.modify (· ++ [n])
 
     for i in [1:10] do
-      SpiderM.liftIO <| trigger i
+      trigger i
 
     let e ← SpiderM.liftIO evensRef.get
     let o ← SpiderM.liftIO oddsRef.get
@@ -73,14 +73,14 @@ test "fan-in: multiple sources merged into one" := do
     let merged ← Event.leftmostM [e1, e2, e3, e4, e5]
 
     let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
-    let _ ← SpiderM.liftIO <| merged.subscribe fun n =>
+    let _ ← merged.subscribe fun n =>
       receivedRef.modify (· ++ [n])
 
-    SpiderM.liftIO <| t3 30
-    SpiderM.liftIO <| t1 10
-    SpiderM.liftIO <| t5 50
-    SpiderM.liftIO <| t2 20
-    SpiderM.liftIO <| t4 40
+    t3 30
+    t1 10
+    t5 50
+    t2 20
+    t4 40
     SpiderM.liftIO receivedRef.get
   shouldBe result [30, 10, 50, 20, 40]
 
@@ -94,12 +94,12 @@ test "fan-in with accumulation" := do
     let accumulated ← Event.accumulateM (· + ·) 0 merged
 
     let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
-    let _ ← SpiderM.liftIO <| accumulated.subscribe fun n =>
+    let _ ← accumulated.subscribe fun n =>
       receivedRef.modify (· ++ [n])
 
-    SpiderM.liftIO <| t1 5
-    SpiderM.liftIO <| t2 10
-    SpiderM.liftIO <| t3 3
+    t1 5
+    t2 10
+    t3 3
     SpiderM.liftIO receivedRef.get
   shouldBe result [5, 15, 18]
 
@@ -117,10 +117,10 @@ test "diamond pattern: split and rejoin" := do
     let joined ← Event.leftmostM [branch1, branch2]
 
     let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
-    let _ ← SpiderM.liftIO <| joined.subscribe fun n =>
+    let _ ← joined.subscribe fun n =>
       receivedRef.modify (· ++ [n])
 
-    SpiderM.liftIO <| trigger 5
+    trigger 5
     SpiderM.liftIO receivedRef.get
   -- Both branches fire, order depends on height ordering
   shouldBe result [15, 25]
@@ -137,10 +137,10 @@ test "diamond pattern with mergeList batching" := do
     let merged ← Event.mergeListM [left, right]
 
     let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List (List Nat))
-    let _ ← SpiderM.liftIO <| merged.subscribe fun ns =>
+    let _ ← merged.subscribe fun ns =>
       receivedRef.modify (· ++ [ns])
 
-    SpiderM.liftIO <| trigger 10
+    trigger 10
     SpiderM.liftIO receivedRef.get
   -- Should batch [20, 30] from both branches
   shouldBe result [[20, 30]]
@@ -156,10 +156,10 @@ test "mergeList separates delayed branch into next frame" := do
     let merged ← Event.mergeListM [immediate, delayedMapped]
 
     let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List (List Nat))
-    let _ ← SpiderM.liftIO <| merged.subscribe fun ns =>
+    let _ ← merged.subscribe fun ns =>
       receivedRef.modify (· ++ [ns])
 
-    SpiderM.liftIO <| trigger 1
+    trigger 1
     SpiderM.liftIO receivedRef.get
   shouldBe result [[2], [101]]
 
@@ -178,10 +178,10 @@ test "multiple diamond patterns" := do
     let d2_merged ← Event.mergeListM [d2_left, d2_right]
 
     let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List (List (List Nat)))
-    let _ ← SpiderM.liftIO <| d2_merged.subscribe fun nss =>
+    let _ ← d2_merged.subscribe fun nss =>
       receivedRef.modify (· ++ [nss])
 
-    SpiderM.liftIO <| trigger 5
+    trigger 5
     SpiderM.liftIO receivedRef.get
   -- First diamond: [6, 7], second diamond transforms and merges
   shouldBe result [[[60, 70], [600, 700]]]
@@ -206,10 +206,10 @@ test "tree topology: one source, multiple levels of derived events" := do
     let merged ← Event.mergeListM [l2a, l2b, l2c, l2d]
 
     let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List (List Nat))
-    let _ ← SpiderM.liftIO <| merged.subscribe fun ns =>
+    let _ ← merged.subscribe fun ns =>
       receivedRef.modify (· ++ [ns])
 
-    SpiderM.liftIO <| trigger 10
+    trigger 10
     SpiderM.liftIO receivedRef.get
   -- source=10 -> l1a=20, l1b=30
   -- l1a=20 -> l2a=21, l2b=22
@@ -228,12 +228,12 @@ test "cyclic-like pattern with gate" := do
     let gated ← Event.gateM gateBehavior source
 
     let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
-    let _ ← SpiderM.liftIO <| gated.subscribe fun n =>
+    let _ ← gated.subscribe fun n =>
       receivedRef.modify (· ++ [n])
 
     -- Fire 5 times
     for i in [1:6] do
-      SpiderM.liftIO <| trigger i
+      trigger i
 
     SpiderM.liftIO receivedRef.get
   -- Counter updates before gate checks (same frame, height ordering)
@@ -259,12 +259,12 @@ test "parallel processing pipelines" := do
     let accumulated ← Event.accumulateM (· + ·) 0 combined
 
     let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
-    let _ ← SpiderM.liftIO <| accumulated.subscribe fun n =>
+    let _ ← accumulated.subscribe fun n =>
       receivedRef.modify (· ++ [n])
 
     -- Fire 1-5
     for i in [1:6] do
-      SpiderM.liftIO <| trigger i
+      trigger i
 
     SpiderM.liftIO receivedRef.get
   -- 1 (odd) -> 3, 2 (even) -> 4, 3 (odd) -> 9, 4 (even) -> 8, 5 (odd) -> 15
@@ -294,22 +294,22 @@ test "switchDyn with filtered events" := do
     let switched ← SpiderM.liftIO <| switchDynWithId eventSelector nodeId
 
     let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
-    let _ ← SpiderM.liftIO <| switched.subscribe fun n =>
+    let _ ← switched.subscribe fun n =>
       receivedRef.modify (· ++ [n])
 
     -- Start with all
-    SpiderM.liftIO <| valueTrigger 1
-    SpiderM.liftIO <| valueTrigger 2
+    valueTrigger 1
+    valueTrigger 2
 
     -- Switch to evens only
-    SpiderM.liftIO <| selectTrigger 1
-    SpiderM.liftIO <| valueTrigger 3  -- odd, filtered
-    SpiderM.liftIO <| valueTrigger 4  -- even, passes
+    selectTrigger 1
+    valueTrigger 3  -- odd, filtered
+    valueTrigger 4  -- even, passes
 
     -- Switch to odds only
-    SpiderM.liftIO <| selectTrigger 2
-    SpiderM.liftIO <| valueTrigger 5  -- odd, passes
-    SpiderM.liftIO <| valueTrigger 6  -- even, filtered
+    selectTrigger 2
+    valueTrigger 5  -- odd, passes
+    valueTrigger 6  -- even, filtered
 
     SpiderM.liftIO receivedRef.get
   shouldBe result [1, 2, 4, 5]
@@ -326,14 +326,14 @@ test "gate with accumulated threshold" := do
     let gated ← Event.gateM gateBehavior values
 
     let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
-    let _ ← SpiderM.liftIO <| gated.subscribe fun n =>
+    let _ ← gated.subscribe fun n =>
       receivedRef.modify (· ++ [n])
 
     -- Fire values that will accumulate
-    SpiderM.liftIO <| trigger 5   -- sum becomes 5, gate checks 5<20=true, passes
-    SpiderM.liftIO <| trigger 10  -- sum becomes 15, gate checks 15<20=true, passes
-    SpiderM.liftIO <| trigger 7   -- sum becomes 22, gate checks 22<20=false, blocked
-    SpiderM.liftIO <| trigger 3   -- sum becomes 25, gate checks 25<20=false, blocked
+    trigger 5   -- sum becomes 5, gate checks 5<20=true, passes
+    trigger 10  -- sum becomes 15, gate checks 15<20=true, passes
+    trigger 7   -- sum becomes 22, gate checks 22<20=false, blocked
+    trigger 3   -- sum becomes 25, gate checks 25<20=false, blocked
 
     SpiderM.liftIO receivedRef.get
   -- Gate samples behavior after foldDyn updates (same frame, height ordering)
@@ -355,14 +355,14 @@ test "mapMaybe with attach" := do
       if product <= 50 then some product else none) attached
 
     let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
-    let _ ← SpiderM.liftIO <| filtered.subscribe fun n =>
+    let _ ← filtered.subscribe fun n =>
       receivedRef.modify (· ++ [n])
 
-    SpiderM.liftIO <| trigger 10  -- 2*10=20 <= 50, passes
-    SpiderM.liftIO <| trigger 20  -- 2*20=40 <= 50, passes
+    trigger 10  -- 2*10=20 <= 50, passes
+    trigger 20  -- 2*20=40 <= 50, passes
     SpiderM.liftIO <| multiplierRef.set 5
-    SpiderM.liftIO <| trigger 10  -- 5*10=50 <= 50, passes
-    SpiderM.liftIO <| trigger 15  -- 5*15=75 > 50, filtered
+    trigger 10  -- 5*10=50 <= 50, passes
+    trigger 15  -- 5*15=75 > 50, filtered
 
     SpiderM.liftIO receivedRef.get
   shouldBe result [20, 40, 50]
@@ -381,14 +381,14 @@ test "dynamic zipWith with multiple dynamics" := do
     let combined ← Dynamic.zipWith3M (fun a b c => a + b + c) d1 d2 d3
 
     let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
-    let _ ← SpiderM.liftIO <| combined.updated.subscribe fun n =>
+    let _ ← combined.updated.subscribe fun n =>
       receivedRef.modify (· ++ [n])
 
     -- Initial: 1+2+3=6
 
-    SpiderM.liftIO <| t1 10  -- 10+2+3=15
-    SpiderM.liftIO <| t2 20  -- 10+20+3=33
-    SpiderM.liftIO <| t3 30  -- 10+20+30=60
+    t1 10  -- 10+2+3=15
+    t2 20  -- 10+20+3=33
+    t3 30  -- 10+20+30=60
 
     SpiderM.liftIO receivedRef.get
   shouldBe result [15, 33, 60]
