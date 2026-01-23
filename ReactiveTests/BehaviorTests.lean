@@ -47,48 +47,48 @@ test "Behavior Monad works" := do
 test "Behavior.hold creates behavior from event" := do
   let result ← runSpider do
     let (event, fire) ← newTriggerEvent (t := Spider) (a := Nat)
-    let behavior ← SpiderM.liftIO <| Behavior.hold 0 event
-    SpiderM.liftIO <| fire 42
+    let behavior ← Behavior.hold 0 event
+    fire 42
     behavior.sample
   shouldBe result 42
 
 test "Behavior.hold updates on each event fire" := do
   let result ← runSpider do
     let (event, fire) ← newTriggerEvent (t := Spider) (a := Nat)
-    let behavior ← SpiderM.liftIO <| Behavior.hold 0 event
-    SpiderM.liftIO <| fire 10
-    SpiderM.liftIO <| fire 20
-    SpiderM.liftIO <| fire 30
+    let behavior ← Behavior.hold 0 event
+    fire 10
+    fire 20
+    fire 30
     behavior.sample
   shouldBe result 30
 
 test "Behavior.foldB accumulates event values" := do
   let result ← runSpider do
     let (event, fire) ← newTriggerEvent (t := Spider) (a := Nat)
-    let behavior ← SpiderM.liftIO <| Behavior.foldB (· + ·) 0 event
-    SpiderM.liftIO <| fire 10
-    SpiderM.liftIO <| fire 20
-    SpiderM.liftIO <| fire 5
+    let behavior ← Behavior.foldB (· + ·) 0 event
+    fire 10
+    fire 20
+    fire 5
     behavior.sample
   shouldBe result 35
 
 test "Behavior.holdM registers with scope" := do
   let result ← runSpider do
     let scope ← SpiderM.getScope
-    let countBefore ← SpiderM.liftIO <| scope.subscriptionCount
+    let countBefore ← scope.subscriptionCount
     let (event, _) ← newTriggerEvent (t := Spider) (a := Nat)
     let _ ← Behavior.holdM 0 event
-    let countAfter ← SpiderM.liftIO <| scope.subscriptionCount
+    let countAfter ← scope.subscriptionCount
     pure (decide (countAfter > countBefore))
   shouldBe result true
 
 test "Behavior.foldBM registers with scope" := do
   let result ← runSpider do
     let scope ← SpiderM.getScope
-    let countBefore ← SpiderM.liftIO <| scope.subscriptionCount
+    let countBefore ← scope.subscriptionCount
     let (event, _) ← newTriggerEvent (t := Spider) (a := Nat)
     let _ ← Behavior.foldBM (· + ·) 0 event
-    let countAfter ← SpiderM.liftIO <| scope.subscriptionCount
+    let countAfter ← scope.subscriptionCount
     pure (decide (countAfter > countBefore))
   shouldBe result true
 
