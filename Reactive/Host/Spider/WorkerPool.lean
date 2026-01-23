@@ -201,6 +201,69 @@ private def nextGeneration [BEq jobId] [Hashable jobId]
   let next := current + 1
   (next, generations.insert id next)
 
+/-- Result of attempting to cancel a job -/
+inductive CancelResult (jobId job : Type) [BEq jobId] [Hashable jobId] where
+  | cancelled (newState : PoolState jobId job)
+  | notFound
+
+/-- Try to cancel a job from state (either pending or running).
+    Returns the new state if cancelled, or notFound if job doesn't exist. -/
+private def tryCancelJob [BEq jobId] [Hashable jobId] [Inhabited jobId] [Inhabited job]
+    (st : PoolState jobId job) (id : jobId) : CancelResult jobId job :=
+  let (queue', foundPending) := heapRemove st.pendingQueue id
+  if foundPending then
+    let (_, gens') := nextGeneration st.generations id
+    let statuses' := st.statuses.insert id JobStatus.cancelled
+    .cancelled { st with
+      pendingQueue := queue'
+      statuses := statuses'
+      generations := gens'
+      version := st.version + 1
+    }
+  else if st.runningJobs.contains id then
+    let (_, gens') := nextGeneration st.generations id
+    let running' := st.runningJobs.erase id
+    let statuses' := st.statuses.insert id JobStatus.cancelled
+    .cancelled { st with
+      runningJobs := running'
+      statuses := statuses'
+      generations := gens'
+      version := st.version + 1
+    }
+  else
+    .notFound
+
+/-- Result of attempting to submit a job -/
+inductive SubmitResult (jobId job : Type) [BEq jobId] [Hashable jobId] where
+  | success (newState : PoolState jobId job)
+  | duplicate
+  | poolClosed
+
+/-- Try to submit a job to state.
+    Returns the new state if successful, or an error indicator. -/
+private def trySubmitJob [BEq jobId] [Hashable jobId] [Inhabited jobId] [Inhabited job]
+    (st : PoolState jobId job) (id : jobId) (theJob : job) (priority : Int)
+    (checkDuplicate : Bool := true) : SubmitResult jobId job :=
+  if st.closed then
+    .poolClosed
+  else if checkDuplicate && (st.pendingQueue.any (·.id == id) || st.runningJobs.contains id) then
+    .duplicate
+  else
+    let seq := st.nextSequence
+    let pendingJob : PendingJob jobId job := {
+      id := id
+      priority := { priority := priority, sequence := seq }
+      payload := theJob
+    }
+    let queue' := heapInsert st.pendingQueue pendingJob
+    let statuses' := st.statuses.insert id JobStatus.pending
+    .success { st with
+      pendingQueue := queue'
+      statuses := statuses'
+      nextSequence := seq + 1
+      version := st.version + 1
+    }
+
 /-- Worker loop with versioned observable updates.
     Uses monotonic version numbers to ensure only the latest state is published,
     preventing stale snapshot races when multiple threads update concurrently. -/
@@ -355,89 +418,43 @@ def fromCommandsWithShutdown [BEq jobId] [Hashable jobId] [Inhabited jobId] [Inh
   for _ in [0:config.workerCount] do
     let _ ← IO.asTask (prio := .dedicated) workerLoop
 
+  -- Helper to signal a worker (ignores errors from closed channel)
+  let signalWorker := fun (sig : Std.CloseableChannel.Sync Unit) => do
+    try let _ ← sig.send () catch _ => pure ()
+
   -- Process commands with versioned updates
   let processCommand := fun (cmd : PoolCommand jobId job) => do
     match cmd with
     | .submit id theJob priority =>
-      -- Check for duplicate job IDs
-      let submitResult ← mutexState.atomically do
+      let (submitResult, sig) ← mutexState.atomically do
         let ms ← get
-        if ms.state.closed then return (.inl none : Sum (Option _) (PoolState jobId job × Nat × Std.CloseableChannel.Sync Unit))
-        -- Check for duplicate ID
-        let alreadyPending := ms.state.pendingQueue.any (·.id == id)
-        let alreadyRunning := ms.state.runningJobs.contains id
-        if alreadyPending || alreadyRunning then
-          return .inl (some "duplicate job ID")
-        -- Create pending job with incremented version
-        let seq := ms.state.nextSequence
-        let pendingJob : PendingJob jobId job := {
-          id := id
-          priority := { priority := priority, sequence := seq }
-          payload := theJob
-        }
-        let queue' := heapInsert ms.state.pendingQueue pendingJob
-        let statuses' := ms.state.statuses.insert id JobStatus.pending
-        let newVersion := ms.state.version + 1
-        let st' := { ms.state with
-          pendingQueue := queue'
-          statuses := statuses'
-          nextSequence := seq + 1
-          version := newVersion
-        }
-        modify fun ms => { ms with state := st' }
-        return .inr (st', newVersion, ms.signal)
+        let result := trySubmitJob ms.state id theJob priority
+        match result with
+        | .success st' =>
+          modify fun ms => { ms with state := st' }
+          return (result, ms.signal)
+        | _ => return (result, ms.signal)
 
       match submitResult with
-      | .inl none => pure ()  -- Pool closed
-      | .inl (some errMsg) =>
-        -- Fire errored event for duplicate (no state change needed)
-        env.withFrame (fireErrored (id, errMsg))
-      | .inr (st, ver, sig) =>
-        -- Update observables in frame with version
-        updateObservablesInFrame st ver
-        -- Signal a worker
-        try
-          let _ ← sig.send ()
-        catch _ => pure ()
+      | .poolClosed => pure ()
+      | .duplicate => env.withFrame (fireErrored (id, "duplicate job ID"))
+      | .success st =>
+        updateObservablesInFrame st st.version
+        signalWorker sig
 
     | .cancel id =>
-      -- Return state and version for unified frame update
       let cancelResult ← mutexState.atomically do
         let ms ← get
-        let st := ms.state
-        let (queue', foundPending) := heapRemove st.pendingQueue id
-        if foundPending then
-          let (_, gens') := nextGeneration st.generations id
-          let statuses' := st.statuses.insert id JobStatus.cancelled
-          let newVersion := st.version + 1
-          let st' := { st with
-            pendingQueue := queue'
-            statuses := statuses'
-            generations := gens'
-            version := newVersion
-          }
+        let result := tryCancelJob ms.state id
+        match result with
+        | .cancelled st' =>
           modify fun ms => { ms with state := st' }
-          return some (st', newVersion)
-        else if st.runningJobs.contains id then
-          let (_, gens') := nextGeneration st.generations id
-          let running' := st.runningJobs.erase id
-          let statuses' := st.statuses.insert id JobStatus.cancelled
-          let newVersion := st.version + 1
-          let st' := { st with
-            runningJobs := running'
-            statuses := statuses'
-            generations := gens'
-            version := newVersion
-          }
-          modify fun ms => { ms with state := st' }
-          return some (st', newVersion)
-        else
-          return none
+          return result
+        | .notFound => return result
 
-      -- Fire cancelled + update observables in single frame with version
       match cancelResult with
-      | some (st, ver) => updateAllInFrame st ver (fireCancelled id)
-      | none => pure ()
+      | .cancelled st => updateAllInFrame st st.version (fireCancelled id)
+      | .notFound => pure ()
 
     | .updatePriority id newPriority =>
       mutexState.atomically do
@@ -446,64 +463,36 @@ def fromCommandsWithShutdown [BEq jobId] [Hashable jobId] [Inhabited jobId] [Inh
         modify fun ms => { ms with state := { ms.state with pendingQueue := queue' } }
 
     | .resubmit id theJob priority =>
-      -- Cancel any existing job AND set cancelled status with incremented version
+      -- Cancel any existing job first
       let cancelResult ← mutexState.atomically do
         let ms ← get
-        let st := ms.state
-        let (queue', foundPending) := heapRemove st.pendingQueue id
-        if foundPending then
-          let (_, gens') := nextGeneration st.generations id
-          let statuses' := st.statuses.insert id JobStatus.cancelled
-          let newVersion := st.version + 1
-          let st' := { st with pendingQueue := queue', generations := gens', statuses := statuses', version := newVersion }
+        let result := tryCancelJob ms.state id
+        match result with
+        | .cancelled st' =>
           modify fun ms => { ms with state := st' }
-          return some (st', newVersion)
-        else if st.runningJobs.contains id then
-          let (_, gens') := nextGeneration st.generations id
-          let running' := st.runningJobs.erase id
-          let statuses' := st.statuses.insert id JobStatus.cancelled
-          let newVersion := st.version + 1
-          let st' := { st with runningJobs := running', generations := gens', statuses := statuses', version := newVersion }
-          modify fun ms => { ms with state := st' }
-          return some (st', newVersion)
-        else
-          return none
+          return result
+        | .notFound => return result
 
-      -- Fire cancelled if there was something to cancel (in frame with state and version)
       match cancelResult with
-      | some (cancelledState, ver) => updateAllInFrame cancelledState ver (fireCancelled id)
-      | none => pure ()
+      | .cancelled st => updateAllInFrame st st.version (fireCancelled id)
+      | .notFound => pure ()
 
-      -- Now submit fresh with incremented version
-      let submitResult ← mutexState.atomically do
+      -- Now submit fresh (no duplicate check since we just cancelled)
+      let (submitResult, sig) ← mutexState.atomically do
         let ms ← get
-        if ms.state.closed then return none
-        let seq := ms.state.nextSequence
-        let pendingJob : PendingJob jobId job := {
-          id := id
-          priority := { priority := priority, sequence := seq }
-          payload := theJob
-        }
-        let queue' := heapInsert ms.state.pendingQueue pendingJob
-        let statuses' := ms.state.statuses.insert id JobStatus.pending
-        let newVersion := ms.state.version + 1
-        let st' := { ms.state with
-          pendingQueue := queue'
-          statuses := statuses'
-          nextSequence := seq + 1
-          version := newVersion
-        }
-        modify fun ms => { ms with state := st' }
-        return some (st', newVersion, ms.signal)
+        let result := trySubmitJob ms.state id theJob priority (checkDuplicate := false)
+        match result with
+        | .success st' =>
+          modify fun ms => { ms with state := st' }
+          return (result, ms.signal)
+        | _ => return (result, ms.signal)
 
       match submitResult with
-      | none => pure ()
-      | some (st, ver, sig) =>
-        -- Update observables in frame with version
-        updateObservablesInFrame st ver
-        try
-          let _ ← sig.send ()
-        catch _ => pure ()
+      | .poolClosed => pure ()
+      | .duplicate => pure ()  -- Can't happen with checkDuplicate=false
+      | .success st =>
+        updateObservablesInFrame st st.version
+        signalWorker sig
 
   let unsub ← Reactive.Event.subscribe commands processCommand
   env.currentScope.register unsub
