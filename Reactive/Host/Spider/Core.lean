@@ -143,21 +143,36 @@ where
 
     Thread-safety: Frame execution is serialized via mutex to prevent concurrent
     async completions from interleaving frame operations and corrupting the
-    propagation queue. -/
+    propagation queue. The mutex is held for the entire frame duration to prevent
+    race conditions. Recursive calls (from within the frame) check `inFrame` before
+    acquiring the lock to avoid deadlock. -/
 def withFrame (env : SpiderEnv) (action : IO Unit) : IO Unit := do
+  -- Fast path: if already in a frame, this is a recursive call from the same
+  -- thread (since we hold the mutex). Just run action - it will enqueue.
   let inFrame ← env.propagationQueue.isInFrame
   if inFrame then
-    -- Already in a frame, just run (fires will enqueue)
     action
   else
-    -- Serialize frame execution across threads to prevent race conditions
-    env.frameMutex.atomically do
-      -- Start new frame, reset propagation counter for infinite loop detection
+    -- Need to start a frame - acquire mutex for thread safety
+    env.frameMutex.mutex.lock
+    -- Double-check inside lock: another thread may have started a frame between
+    -- our check and lock acquisition
+    let inFrameNow ← env.propagationQueue.isInFrame
+    if inFrameNow then
+      -- Another thread started a frame and released the lock (but hasn't cleared
+      -- inFrame yet). Run our action - it will enqueue to their frame.
+      env.frameMutex.mutex.unlock
+      action
+    else
+      -- We're starting a new frame. Keep mutex held until frame completes.
       env.propagationDepth.set 0
       env.propagationQueue.setInFrame true
-      action
-      env.drainQueue
-      env.propagationQueue.setInFrame false
+      try
+        action
+        env.drainQueue
+      finally
+        env.propagationQueue.setInFrame false
+        env.frameMutex.mutex.unlock
 
 end SpiderEnv
 

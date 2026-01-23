@@ -237,6 +237,7 @@ private partial def workerLoop [Inhabited job] (queue : JobQueue job) (pendingRe
       let currentGen ← queue.getGeneration
       if theJob.generation != currentGen then
         pendingRef.modify (· - 1)
+        triggersRef.modify (·.erase theJob.id)  -- Clean up trigger to avoid leak
         loop
       else
         -- Process the job
