@@ -26,12 +26,12 @@ test "setErrorHandler changes active handler" := do
     SpiderM.setErrorHandler customHandler
 
     let (event, trigger) ← newTriggerEvent (t := Spider) (a := Unit)
-    let _ ← SpiderM.liftIO <| event.subscribe fun _ =>
+    let _ ← event.subscribe fun _ =>
       throw (IO.userError "error")
 
-    SpiderM.liftIO <| trigger ()
-    SpiderM.liftIO <| trigger ()
-    SpiderM.liftIO <| trigger ()
+    trigger ()
+    trigger ()
+    trigger ()
 
     SpiderM.liftIO handlerCallsRef.get
   shouldBe result 3
@@ -61,10 +61,10 @@ test "error handler receives correct error message" := do
     SpiderM.setErrorHandler customHandler
 
     let (event, trigger) ← newTriggerEvent (t := Spider) (a := Unit)
-    let _ ← SpiderM.liftIO <| event.subscribe fun _ =>
+    let _ ← event.subscribe fun _ =>
       throw (IO.userError "specific error message")
 
-    SpiderM.liftIO <| trigger ()
+    trigger ()
     SpiderM.liftIO errorMsgRef.get
   -- The error message should contain our specific text
   let parts := result.splitOn "specific error message"
@@ -78,18 +78,18 @@ test "default handler allows propagation to continue across frames" := do
     let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
 
     -- Event1 throws
-    let _ ← SpiderM.liftIO <| event1.subscribe fun _ =>
+    let _ ← event1.subscribe fun _ =>
       throw (IO.userError "error from event1")
 
     -- Event2 collects values
-    let _ ← SpiderM.liftIO <| event2.subscribe fun n =>
+    let _ ← event2.subscribe fun n =>
       receivedRef.modify (· ++ [n])
 
     -- Fire event1 (throws, but default handler continues)
-    SpiderM.liftIO <| trigger1 1
+    trigger1 1
     -- Fire event2 (should still work)
-    SpiderM.liftIO <| trigger2 42
-    SpiderM.liftIO <| trigger2 43
+    trigger2 42
+    trigger2 43
 
     SpiderM.liftIO receivedRef.get
   shouldBe result [42, 43]
@@ -100,12 +100,12 @@ test "strict handler stops propagation on error" := do
     let valuesRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
 
     -- This subscriber records then throws on value 2
-    let _ ← SpiderM.liftIO <| event.subscribe fun n => do
+    let _ ← event.subscribe fun n => do
       if n == 2 then
         throw (IO.userError "error on 2")
       valuesRef.modify (· ++ [n])
 
-    SpiderM.liftIO <| trigger 1  -- succeeds
+    trigger 1  -- succeeds
     -- trigger 2 would cause an error, which stops propagation
     SpiderM.liftIO valuesRef.get
   ) strictErrorHandler
@@ -126,18 +126,18 @@ test "error handler called once per throwing event" := do
     let (eventB, triggerB) ← newTriggerEvent (t := Spider) (a := Unit)
 
     -- EventA throws
-    let _ ← SpiderM.liftIO <| eventA.subscribe fun _ =>
+    let _ ← eventA.subscribe fun _ =>
       throw (IO.userError "A error")
 
     -- EventB succeeds
-    let _ ← SpiderM.liftIO <| eventB.subscribe fun _ =>
+    let _ ← eventB.subscribe fun _ =>
       valueCountRef.modify (· + 1)
 
     -- Fire both - A's error is caught, B still runs
-    SpiderM.liftIO <| triggerA ()
-    SpiderM.liftIO <| triggerB ()
-    SpiderM.liftIO <| triggerA ()
-    SpiderM.liftIO <| triggerB ()
+    triggerA ()
+    triggerB ()
+    triggerA ()
+    triggerB ()
 
     let errors ← SpiderM.liftIO errorCountRef.get
     let values ← SpiderM.liftIO valueCountRef.get
@@ -158,11 +158,11 @@ test "errors in derived events trigger handler" := do
     let mapped ← Event.mapM (· * 2) event
 
     -- Subscriber on derived event throws
-    let _ ← SpiderM.liftIO <| mapped.subscribe fun _ =>
+    let _ ← mapped.subscribe fun _ =>
       throw (IO.userError "derived error")
 
-    SpiderM.liftIO <| trigger 1
-    SpiderM.liftIO <| trigger 2
+    trigger 1
+    trigger 2
     SpiderM.liftIO errorCountRef.get
   shouldBe result 2
 
@@ -189,7 +189,7 @@ test "construction depth limit throws on exceeded" := do
         let env ← SpiderM.getEnv
         -- Simulate exceeding the depth limit
         for _ in [:maxConstructionDepth + 100] do
-          let _ ← SpiderM.liftIO <| env.incrementDepth "test"
+          let _ ← env.incrementDepth "test"
         pure ()
       pure false  -- Should not reach here
     catch _ =>
@@ -202,7 +202,7 @@ test "construction depth limit error message contains operation name" := do
       let _ ← SpiderM.runFresh do
         let env ← SpiderM.getEnv
         for _ in [:maxConstructionDepth + 1] do
-          let _ ← SpiderM.liftIO <| env.incrementDepth "myOperation"
+          let _ ← env.incrementDepth "myOperation"
         pure ()
       pure ""
     catch e =>
@@ -220,11 +220,11 @@ test "propagation depth limit throws on exceeded" := do
         -- Create an event that triggers itself recursively
         let (event, trigger) ← newTriggerEvent (t := Spider) (a := Nat)
         -- Subscribe to fire the same event again (infinite loop)
-        let _ ← SpiderM.liftIO <| event.subscribe fun n => do
+        let _ ← event.subscribe fun n => do
           if n < maxPropagationDepth + 100 then
             trigger (n + 1)
         -- Start the infinite loop
-        SpiderM.liftIO <| trigger 0
+        trigger 0
         pure ()
       pure false  -- Should not reach here
     catch _ =>
@@ -236,10 +236,10 @@ test "propagation depth limit error message mentions propagation" := do
     try
       let _ ← SpiderM.runFresh do
         let (event, trigger) ← newTriggerEvent (t := Spider) (a := Nat)
-        let _ ← SpiderM.liftIO <| event.subscribe fun n => do
+        let _ ← event.subscribe fun n => do
           if n < maxPropagationDepth + 100 then
             trigger (n + 1)
-        SpiderM.liftIO <| trigger 0
+        trigger 0
         pure ()
       pure ""
     catch e =>
