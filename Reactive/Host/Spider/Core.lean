@@ -73,6 +73,8 @@ structure SpiderEnv where
   constructionDepth : IO.Ref Nat
   /-- Propagation depth counter for infinite event loop detection -/
   propagationDepth : IO.Ref Nat
+  /-- Mutex to serialize frame execution across threads -/
+  frameMutex : Std.Mutex Unit
 
 namespace SpiderEnv
 
@@ -86,9 +88,10 @@ def new (errorHandler : PropagationErrorHandler := defaultErrorHandler) : IO Spi
   let errorHandlerRef ← IO.mkRef errorHandler
   let constructionDepth ← IO.mkRef 0
   let propagationDepth ← IO.mkRef 0
+  let frameMutex ← Std.Mutex.new ()
   -- Set global propagation context for frame-based firing
   setPropagationContext propagationQueue
-  pure { timelineCtx, postBuildActions, postBuildEvent, postBuildTrigger, propagationQueue, currentScope, errorHandler := errorHandlerRef, constructionDepth, propagationDepth }
+  pure { timelineCtx, postBuildActions, postBuildEvent, postBuildTrigger, propagationQueue, currentScope, errorHandler := errorHandlerRef, constructionDepth, propagationDepth, frameMutex }
 
 /-- Increment construction depth and throw if exceeded. Returns the new depth. -/
 def incrementDepth (env : SpiderEnv) (operation : String) : IO Nat := do
@@ -136,19 +139,25 @@ where
 
 /-- Execute an action within a propagation frame.
     If already in a frame, just runs the action (it will enqueue).
-    If not in a frame, starts a new frame, runs action, then drains queue. -/
+    If not in a frame, starts a new frame, runs action, then drains queue.
+
+    Thread-safety: Frame execution is serialized via mutex to prevent concurrent
+    async completions from interleaving frame operations and corrupting the
+    propagation queue. -/
 def withFrame (env : SpiderEnv) (action : IO Unit) : IO Unit := do
   let inFrame ← env.propagationQueue.isInFrame
   if inFrame then
     -- Already in a frame, just run (fires will enqueue)
     action
   else
-    -- Start new frame, reset propagation counter for infinite loop detection
-    env.propagationDepth.set 0
-    env.propagationQueue.setInFrame true
-    action
-    env.drainQueue
-    env.propagationQueue.setInFrame false
+    -- Serialize frame execution across threads to prevent race conditions
+    env.frameMutex.atomically do
+      -- Start new frame, reset propagation counter for infinite loop detection
+      env.propagationDepth.set 0
+      env.propagationQueue.setInFrame true
+      action
+      env.drainQueue
+      env.propagationQueue.setInFrame false
 
 end SpiderEnv
 

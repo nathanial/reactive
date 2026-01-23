@@ -65,7 +65,7 @@ def noop : AsyncHandle where
 end AsyncHandle
 
 /-- Run an async IO action, returning a Dynamic of its state.
-    Transitions: pending → loading → ready/error -/
+    Transitions: loading → ready/error -/
 def asyncIO (action : IO a) : SpiderM (Dyn (AsyncState String a)) := ⟨fun env => do
   let (dyn, update) ← createDynamic env.timelineCtx (AsyncState.loading : AsyncState String a)
   let framedUpdate := fun v => env.withFrame (update v)
@@ -78,7 +78,12 @@ def asyncIO (action : IO a) : SpiderM (Dyn (AsyncState String a)) := ⟨fun env 
   pure dyn⟩
 
 /-- Run an async IO action with typed errors.
-    The action returns Except for explicit error handling. -/
+    The action returns Except for explicit error handling.
+
+    **Exception handling**: If the action throws an unexpected IO exception (not via Except),
+    it is logged to stderr and the state remains `loading`. This prevents app crashes but
+    callers waiting on the result will not receive updates. Prefer handling all errors
+    explicitly within the action using `Except`. -/
 def asyncIOE (action : IO (Except e a)) : SpiderM (Dyn (AsyncState e a)) := ⟨fun env => do
   let (dyn, update) ← createDynamic env.timelineCtx (AsyncState.loading : AsyncState e a)
   let framedUpdate := fun v => env.withFrame (update v)
@@ -87,13 +92,19 @@ def asyncIOE (action : IO (Except e a)) : SpiderM (Dyn (AsyncState e a)) := ⟨f
       match ← action with
       | .ok result => framedUpdate (AsyncState.ready result)
       | .error err => framedUpdate (AsyncState.error err)
-    catch e =>
-      -- Unexpected exception - we can't convert it to e, so panic
-      panic! s!"asyncIOE: Unexpected exception: {e}"
+    catch ex =>
+      -- Unexpected exception - log it, state stays loading
+      IO.eprintln s!"asyncIOE: Unexpected exception: {ex}"
   pure dyn⟩
 
 /-- Run an async IO action with explicit cancellation handle.
-    The operation can be canceled before completion. -/
+
+    **Cancellation semantics**: Calling `cancel` on the handle prevents state updates
+    but does NOT abort the underlying IO operation. The task continues to run in the
+    background; only the result is discarded. This is a "soft" cancellation that avoids
+    race conditions in state management.
+
+    For true task abortion, consider cooperative cancellation within the action itself. -/
 def asyncIOCancelable (action : IO a) : SpiderM (Dyn (AsyncState String a) × AsyncHandle) := ⟨fun env => do
   let (dyn, update) ← createDynamic env.timelineCtx (AsyncState.loading : AsyncState String a)
   let framedUpdate := fun v => env.withFrame (update v)
@@ -118,8 +129,15 @@ def asyncIOCancelable (action : IO a) : SpiderM (Dyn (AsyncState String a) × As
   pure (dyn, handle)⟩
 
 /-- Event-driven async: run an async action for each event occurrence.
-    Each new event cancels the previous pending operation (if any).
-    Uses generation counters for staleness detection. -/
+    Each new event "cancels" the previous pending operation (if any).
+    Uses generation counters for staleness detection.
+
+    **Cancellation semantics**: "Cancellation" here means the result is ignored via
+    generation check. Previous tasks are NOT aborted; they continue running but their
+    results are discarded. This prevents stale results from overwriting newer state.
+
+    For resource-intensive operations, consider adding cooperative cancellation within
+    the action to avoid wasted work. -/
 def asyncOnEvent (event : Evt a) (action : a → IO b) : SpiderM (Dyn (AsyncState String b)) := ⟨fun env => do
   let generationRef ← IO.mkRef (0 : Nat)
   let (dyn, update) ← createDynamic env.timelineCtx (AsyncState.pending : AsyncState String b)
@@ -221,7 +239,11 @@ private partial def asyncOnEventWithRetryLoop
       asyncOnEventWithRetryLoop framedUpdate config generationRef action value generation newState
 
 /-- Event-driven async with retry: runs action for each event with retry logic.
-    Each new event cancels any pending operation (including retries). -/
+    Each new event "cancels" any pending operation (including retries).
+
+    **Cancellation semantics**: Same as `asyncOnEvent` - previous tasks are NOT aborted,
+    only their results are ignored. Retry delays still run but generation checks prevent
+    stale updates. -/
 def asyncOnEventWithRetry (config : RetryConfig) (event : Evt a) (action : a → IO b)
     : SpiderM (Dyn (AsyncState (RetryState × String) b)) := ⟨fun env => do
   let generationRef ← IO.mkRef (0 : Nat)

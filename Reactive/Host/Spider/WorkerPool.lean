@@ -134,14 +134,24 @@ private def JobQueue.new (α : Type) : IO (JobQueue α) := do
   let signal ← Std.CloseableChannel.Sync.new
   return { state, signal }
 
-private def JobQueue.close (queue : JobQueue α) : IO Unit := do
-  queue.state.atomically do
-    modify fun (st : HeapState α) => { st with closed := true, heap := #[], generation := st.generation + 1 }
+/-- Close the queue and return the IDs of all pending jobs that were discarded.
+    These job IDs should have their triggers cleaned up. -/
+private def JobQueue.closeAndGetPendingIds (queue : JobQueue α) : IO (Array Nat) := do
+  let pendingIds ← queue.state.atomically do
+    let st ← get
+    let ids := st.heap.map (·.id)
+    modify fun (s : HeapState α) => { s with closed := true, heap := #[], generation := s.generation + 1 }
+    pure ids
   try
     let _ ← Std.CloseableChannel.Sync.close queue.signal
     pure ()
   catch _ =>
     pure ()
+  return pendingIds
+
+private def JobQueue.close (queue : JobQueue α) : IO Unit := do
+  let _ ← queue.closeAndGetPendingIds
+  pure ()
 
 private def JobQueue.push [Inhabited α] (queue : JobQueue α) (job : PoolJob α) : IO Unit := do
   let shouldSignal ← queue.state.atomically do
@@ -157,6 +167,23 @@ private def JobQueue.push [Inhabited α] (queue : JobQueue α) (job : PoolJob α
       pure ()
     catch _ =>
       pure ()
+
+/-- Push a job if the queue is open. Returns true if pushed, false if queue is closed. -/
+private def JobQueue.pushIfOpen [Inhabited α] (queue : JobQueue α) (job : PoolJob α) : IO Bool := do
+  let pushed ← queue.state.atomically do
+    let st ← get
+    if st.closed then
+      return false
+    else
+      modify fun (s : HeapState α) => { s with heap := heapInsert s.heap job }
+      return true
+  if pushed then
+    try
+      let _ ← Std.CloseableChannel.Sync.send queue.signal ()
+      pure ()
+    catch _ =>
+      pure ()
+  return pushed
 
 private partial def JobQueue.recv [Inhabited α] (queue : JobQueue α) : IO (Option (PoolJob α)) := do
   let signal? ← queue.signal.recv
@@ -232,7 +259,15 @@ private partial def workerLoop [Inhabited job] (queue : JobQueue job) (pendingRe
           loop
   loop
 
-/-- Create a new worker pool -/
+/-- Create a new worker pool.
+
+    **Exception handling**: If `process` throws an exception, it is silently dropped.
+    The job's result event will never fire in this case. Callers should handle errors
+    within `process` by returning an `Except` or `Option` type rather than throwing.
+
+    **Shutdown behavior**: On shutdown, pending jobs are discarded without processing.
+    Their result events will never fire. The `completed` event only fires for jobs
+    that successfully complete processing. -/
 def new [Inhabited job] (config : WorkerPoolConfig) (process : job → IO result)
     : SpiderM (WorkerPool job result) := ⟨fun env => do
   let jobQueue ← JobQueue.new job
@@ -259,11 +294,11 @@ def new [Inhabited job] (config : WorkerPoolConfig) (process : job → IO result
       -- Create job
       let theJob ← jobQueue.nextJob jobPayload priority
 
-      triggersRef.modify (·.insert theJob.id framedFireResult)
-      pendingRef.modify (· + 1)
-
-      -- Push job to queue
-      jobQueue.push theJob
+      -- Try to push; if queue is closed, don't register trigger or increment pending
+      let wasPushed ← jobQueue.pushIfOpen theJob
+      if wasPushed then
+        triggersRef.modify (·.insert theJob.id framedFireResult)
+        pendingRef.modify (· + 1)
 
       pure resultEvent⟩
 
@@ -271,7 +306,13 @@ def new [Inhabited job] (config : WorkerPoolConfig) (process : job → IO result
 
     pending := pendingRef.get
 
-    shutdown := jobQueue.close
+    shutdown := do
+      -- Get all pending job IDs before clearing
+      let pendingIds ← jobQueue.closeAndGetPendingIds
+      -- Clean up triggers for pending jobs (their result events will never fire)
+      for id in pendingIds do
+        triggersRef.modify (·.erase id)
+      pendingRef.set 0
   }
 
   pure pool⟩
