@@ -305,4 +305,189 @@ test "worker pool graceful shutdown stops new jobs" := do
   -- Only first job should have started (second was discarded by shutdown)
   shouldBe result 1
 
+/-! ## Concurrency Stress Tests -/
+
+test "concurrent frame execution serializes correctly" := do
+  -- This test verifies that the recursive mutex properly serializes frame execution
+  -- across multiple concurrent async completions
+  let result ← runSpider do
+    let (dyn, set) ← pushState (0 : Nat)
+    let counterRef ← SpiderM.liftIO <| IO.mkRef (0 : Nat)
+
+    -- Subscribe to count updates
+    let _ ← dyn.updated.subscribe fun _ =>
+      counterRef.modify (· + 1)
+
+    -- Spawn many concurrent tasks that all try to update the state
+    let numTasks := 50
+    let tasksRef ← SpiderM.liftIO <| IO.mkRef ([] : List (Task (Except IO.Error Unit)))
+    for i in [0:numTasks] do
+      let task ← SpiderM.liftIO <| IO.asTask (prio := .dedicated) do
+        -- Small random-ish delay to increase interleaving
+        if i % 3 == 0 then IO.sleep 1
+        set i
+
+      SpiderM.liftIO <| tasksRef.modify (task :: ·)
+
+    -- Wait for all tasks to complete
+    let tasks ← SpiderM.liftIO tasksRef.get
+    for task in tasks do
+      let _ ← SpiderM.liftIO <| IO.wait task
+
+    -- Small delay to ensure all frames complete
+    SpiderM.liftIO <| IO.sleep 50
+
+    -- All updates should have been processed
+    let updateCount ← SpiderM.liftIO counterRef.get
+    let finalValue ← dyn.sample
+    pure (updateCount, finalValue)
+
+  -- All 50 updates should have been received (one per set call)
+  shouldBe result.fst 50
+  -- Final value should be some number in [0, 49]
+  shouldSatisfy (result.snd < 50) "final value should be less than 50"
+
+test "concurrent frame execution with nested triggers" := do
+  -- Test that nested trigger chains work correctly under concurrent load
+  let result ← runSpider do
+    -- Create a chain: source -> derived1 -> derived2
+    let (sourceEvt, fireSource) ← newTriggerEvent (t := Spider) (a := Nat)
+    let (derived1Evt, fireDerived1) ← newTriggerEvent (t := Spider) (a := Nat)
+    let (derived2Evt, fireDerived2) ← newTriggerEvent (t := Spider) (a := Nat)
+
+    -- Wire up the chain
+    let _ ← sourceEvt.subscribe fun n => fireDerived1 (n * 2)
+    let _ ← derived1Evt.subscribe fun n => fireDerived2 (n + 1)
+
+    -- Collect final results
+    let resultsRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
+    let _ ← derived2Evt.subscribe fun n =>
+      resultsRef.modify (· ++ [n])
+
+    -- Fire from many concurrent tasks
+    let numTasks := 30
+    let tasksRef ← SpiderM.liftIO <| IO.mkRef ([] : List (Task (Except IO.Error Unit)))
+    for i in [0:numTasks] do
+      let task ← SpiderM.liftIO <| IO.asTask (prio := .dedicated) do
+        fireSource i
+
+      SpiderM.liftIO <| tasksRef.modify (task :: ·)
+
+    -- Wait for all tasks
+    let tasks ← SpiderM.liftIO tasksRef.get
+    for task in tasks do
+      let _ ← SpiderM.liftIO <| IO.wait task
+
+    SpiderM.liftIO <| IO.sleep 50
+    SpiderM.liftIO resultsRef.get
+
+  -- Should have 30 results, each is (i * 2) + 1 for i in [0, 29]
+  shouldBe result.length 30
+  -- All results should be odd numbers (n*2+1)
+  shouldSatisfy (result.all (· % 2 == 1)) "all results should be odd"
+
+test "worker pool concurrent submissions all complete" := do
+  -- Stress test: many concurrent submissions should all complete
+  let numJobs := 100
+  let result ← runSpider do
+    let config : WorkerPoolConfig := { workerCount := 4 }
+    let completedRef ← SpiderM.liftIO <| IO.mkRef (0 : Nat)
+
+    let pool ← WorkerPool.new config fun (n : Nat) => do
+      -- Small work simulation
+      if n % 5 == 0 then IO.sleep 1
+      pure (n * 2)
+
+    -- Subscribe to completion event
+    let _ ← pool.completed.subscribe fun _ =>
+      completedRef.modify (· + 1)
+
+    -- Submit many jobs (submissions are fast, processing is concurrent)
+    for i in [0:numJobs] do
+      let _ ← pool.submit i (i % 10)
+
+    -- Wait for processing to complete
+    SpiderM.liftIO <| IO.sleep 300
+    pool.shutdown
+
+    SpiderM.liftIO completedRef.get
+
+  -- All jobs should have completed
+  shouldBe result numJobs
+
+test "worker pool per-job result events fire correctly" := do
+  -- Test that individual result events fire even with concurrent submissions
+  -- Note: Jobs have a small delay to ensure subscriptions complete before results fire
+  let numJobs := 50
+  let result ← runSpider do
+    let config : WorkerPoolConfig := { workerCount := 4 }
+    let resultsRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
+
+    let pool ← WorkerPool.new config fun (n : Nat) => do
+      -- Small delay ensures subscription happens before result fires
+      IO.sleep 5
+      pure (n * 3)
+
+    -- Submit jobs and track individual results
+    for i in [0:numJobs] do
+      let resultEvt ← pool.submit i 0
+      let _ ← resultEvt.subscribe fun r => do
+        resultsRef.modify (r :: ·)
+
+    -- Wait for processing - give enough time for all 50 jobs
+    SpiderM.liftIO <| IO.sleep 500
+    pool.shutdown
+
+    let results ← SpiderM.liftIO resultsRef.get
+    pure results.length
+
+  -- All individual result events should have fired
+  shouldBe result numJobs
+
+test "mixed async operations under load" := do
+  -- Combine multiple async patterns under concurrent load
+  let result ← runSpider do
+    let counterRef ← SpiderM.liftIO <| IO.mkRef (0 : Nat)
+
+    -- Pattern 1: pushState with concurrent updates
+    let (dyn1, set1) ← pushState (0 : Nat)
+    let _ ← dyn1.updated.subscribe fun _ =>
+      counterRef.modify (· + 1)
+
+    -- Pattern 2: asyncIO operations (these complete asynchronously)
+    for _ in [0:10] do
+      let _ ← asyncIO do
+        IO.sleep 5
+        pure 42
+
+    -- Pattern 3: Worker pool
+    let config : WorkerPoolConfig := { workerCount := 2 }
+    let pool ← WorkerPool.new config fun (n : Nat) => pure n
+    let _ ← pool.completed.subscribe fun _ =>
+      counterRef.modify (· + 1)
+
+    -- Concurrent pushState updates from multiple threads
+    let tasksRef ← SpiderM.liftIO <| IO.mkRef ([] : List (Task (Except IO.Error Unit)))
+    for i in [0:20] do
+      let task ← SpiderM.liftIO <| IO.asTask (prio := .dedicated) do
+        set1 i
+      SpiderM.liftIO <| tasksRef.modify (task :: ·)
+
+    -- Submit worker pool jobs (not concurrent - just fast sequential submissions)
+    for i in [0:20] do
+      let _ ← pool.submit i 0
+
+    -- Wait for all concurrent pushState tasks
+    let tasks ← SpiderM.liftIO tasksRef.get
+    for task in tasks do
+      let _ ← SpiderM.liftIO <| IO.wait task
+
+    SpiderM.liftIO <| IO.sleep 200
+    pool.shutdown
+
+    -- Should have: 20 pushState updates + 20 worker pool completions = 40
+    SpiderM.liftIO counterRef.get
+
+  shouldBe result 40
+
 end ReactiveTests.AsyncTests
