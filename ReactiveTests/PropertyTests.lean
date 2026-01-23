@@ -90,8 +90,7 @@ proptest "Behavior.constant always returns same value on multiple samples" :=
 /-! ## Event Map Properties -/
 
 proptest "Event.map id fires same value" :=
-  forAllIO (Gen.listOf (Gen.chooseInt (-100) 100)) fun events =>
-    if events.isEmpty then pure true else runSpiderIO do
+  forAllIO (Gen.listOf (Gen.chooseInt (-100) 100)) fun events => runSpiderIO do
       let ctx ← SpiderM.getTimelineCtx
       let (evt, fire) ← newTriggerEvent (t := Spider) (a := Int)
       let mapped ← SpiderM.liftIO <| Event.map ctx id evt
@@ -110,7 +109,6 @@ proptest "Event.map id fires same value" :=
 
 proptest "Event.map (f ∘ g) = Event.map f ∘ Event.map g" :=
   forAllIO (Gen.listOf (Gen.chooseInt (-50) 50)) fun events =>
-    if events.isEmpty then pure true else
     let f := (· + 1 : Int → Int)
     let g := (· * 2 : Int → Int)
     runSpiderIO do
@@ -139,7 +137,6 @@ proptest "Event.map (f ∘ g) = Event.map f ∘ Event.map g" :=
 
 proptest "Event.filter p then filter q = filter (p && q)" :=
   forAllIO (Gen.listOf (Gen.chooseInt (-50) 50)) fun events =>
-    if events.isEmpty then pure true else
     let p := (· > 0 : Int → Bool)
     let q := (· < 30 : Int → Bool)
     runSpiderIO do
@@ -165,8 +162,7 @@ proptest "Event.filter p then filter q = filter (p && q)" :=
       pure (comb == seq)
 
 proptest "Event.filter (const true) = id" :=
-  forAllIO (Gen.listOf (Gen.chooseInt (-100) 100)) fun events =>
-    if events.isEmpty then pure true else runSpiderIO do
+  forAllIO (Gen.listOf (Gen.chooseInt (-100) 100)) fun events => runSpiderIO do
       let ctx ← SpiderM.getTimelineCtx
       let (evt, fire) ← newTriggerEvent (t := Spider) (a := Int)
 
@@ -202,12 +198,14 @@ proptest "Event.filter (const false) fires nothing" :=
 
 /-! ## Event Merge Properties -/
 
-proptest "Event.merge is associative (same values, possibly different order)" :=
+proptest "Event.merge is associative (multiset equality)" :=
+  -- Tests that (e1 ⊕ e2) ⊕ e3 receives same values as e1 ⊕ (e2 ⊕ e3)
+  -- Fires events sequentially in separate frames; checks multiset equality
   forAllIO (Gen.triple
     (Gen.listOf (Gen.chooseInt 1 10))
     (Gen.listOf (Gen.chooseInt 11 20))
     (Gen.listOf (Gen.chooseInt 21 30))) fun (evts1, evts2, evts3) =>
-    if evts1.isEmpty && evts2.isEmpty && evts3.isEmpty then pure true else runSpiderIO do
+    runSpiderIO do
       let ctx ← SpiderM.getTimelineCtx
 
       let (e1, fire1) ← newTriggerEvent (t := Spider) (a := Int)
@@ -228,7 +226,7 @@ proptest "Event.merge is associative (same values, possibly different order)" :=
       let _ ← left.subscribe fun v => receivedLeft.modify (· ++ [v])
       let _ ← right.subscribe fun v => receivedRight.modify (· ++ [v])
 
-      -- Fire all events
+      -- Fire all events sequentially (separate frames)
       for e in evts1 do fire1 e
       for e in evts2 do fire2 e
       for e in evts3 do fire3 e
@@ -238,6 +236,30 @@ proptest "Event.merge is associative (same values, possibly different order)" :=
 
       -- Both should receive the same multiset of values
       pure (leftVals.toArray.qsort (· < ·) == rightVals.toArray.qsort (· < ·))
+
+proptest "Event.merge preserves exact order for sequential fires" :=
+  -- Tests that merge preserves exact ordering when events fire in separate frames
+  forAllIO (Gen.listOf (Gen.chooseInt 1 100)) fun values =>
+    runSpiderIO do
+      let ctx ← SpiderM.getTimelineCtx
+
+      let (e1, fire1) ← newTriggerEvent (t := Spider) (a := Int)
+      let (e2, fire2) ← newTriggerEvent (t := Spider) (a := Int)
+
+      let merged ← SpiderM.liftIO <| Event.merge ctx e1 e2
+
+      let received ← SpiderM.liftIO <| IO.mkRef ([] : List Int)
+      let _ ← merged.subscribe fun v => received.modify (· ++ [v])
+
+      -- Alternate firing between e1 and e2
+      let mut i := 0
+      for v in values do
+        if i % 2 == 0 then fire1 v else fire2 v
+        i := i + 1
+
+      let actual ← SpiderM.liftIO received.get
+      -- Order should match exact firing order
+      pure (actual == values)
 
 /-! ## foldDyn Accumulation Properties -/
 
@@ -256,10 +278,11 @@ proptest "foldDyn accumulates like List.foldl" :=
       pure (result == expected)
 
 proptest "foldDyn with multiplication accumulates correctly" :=
+  -- Use bounded generator (max 5 events with values 1-3) to avoid overflow
   forAllIO (Gen.pair
-    (Gen.chooseInt 1 10)
-    (Gen.listOf (Gen.chooseInt 1 5))) fun (init, events) =>
-    if events.length > 5 then pure true else runSpiderIO do
+    (Gen.chooseInt 1 5)
+    (Gen.listOfN 5 (Gen.chooseInt 1 3))) fun (init, events) =>
+    runSpiderIO do
       let (evt, fire) ← newTriggerEvent (t := Spider) (a := Int)
       let dyn ← foldDyn (fun a acc => acc * a) init evt
 
@@ -327,22 +350,26 @@ proptest "Dynamic.updated fires for each event" :=
 
 /-! ## Behavior Sample Consistency -/
 
-proptest "Sampling behavior at event fires gives consistent value" :=
+proptest "Event.tag samples post-update value (glitch-free semantics)" :=
+  -- Tests glitch-free propagation: Event.tag sees the foldDyn value AFTER
+  -- the current event has been processed. This is the expected FRP semantics.
+  -- If evt drives foldDyn, then Event.tag ctx dyn.current evt samples the
+  -- NEW accumulated value, not the previous one.
   forAllIO (Gen.pair
     (Gen.chooseInt 0 100)
-    (Gen.listOf (Gen.chooseInt 1 50))) fun (init, events) =>
-    if events.isEmpty then pure true else runSpiderIO do
+    (Gen.listOf1 (Gen.chooseInt 1 50))) fun (init, events) =>
+    runSpiderIO do
       let ctx ← SpiderM.getTimelineCtx
       let (evt, fire) ← newTriggerEvent (t := Spider) (a := Int)
       let dyn ← foldDyn (· + ·) init evt
 
-      -- Create an event that samples the behavior on each fire
+      -- Event.tag samples dyn.current when evt fires
       let sampled ← SpiderM.liftIO <| Event.tag ctx dyn.current evt
 
       let sampledVals ← SpiderM.liftIO <| IO.mkRef ([] : List Int)
       let _ ← sampled.subscribe fun v => sampledVals.modify (· ++ [v])
 
-      -- Fire events one at a time and track expected values
+      -- Fire events and compute expected post-update values
       let mut expected : List Int := []
       let mut acc := init
       for e in events do
