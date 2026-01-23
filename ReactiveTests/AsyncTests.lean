@@ -279,23 +279,30 @@ test "worker pool processes in priority order" := do
   -- Should process in priority order: 2 (pri 5), 1 (pri 3), 3 (pri 1)
   shouldBe result [2, 1, 3]
 
-test "worker pool graceful shutdown" := do
+test "worker pool graceful shutdown stops new jobs" := do
+  let startedRef ← IO.mkRef (0 : Nat)
   let result ← runSpider do
-    let config : WorkerPoolConfig := { workerCount := 2 }
+    let config : WorkerPoolConfig := { workerCount := 1 }  -- Single worker
     let pool ← WorkerPool.new config fun (_ : Nat) => do
+      startedRef.modify (· + 1)
       IO.sleep 10
       pure 0
 
-    -- Submit some jobs
+    -- Submit first job - it will start processing
     let _ ← pool.submit 1 0
+    SpiderM.liftIO <| IO.sleep 5  -- Let worker pick it up
+
+    -- Submit second job while first is processing
     let _ ← pool.submit 2 0
 
-    -- Shutdown immediately
+    -- Shutdown before second job can be processed
     pool.shutdown
 
-    -- Pending should be 0 after shutdown clears queue
-    SpiderM.liftIO pool.pending
+    -- Wait for everything to settle
+    SpiderM.liftIO <| IO.sleep 50
+    SpiderM.liftIO startedRef.get
 
-  shouldBe result 0
+  -- Only first job should have started (second was discarded by shutdown)
+  shouldBe result 1
 
 end ReactiveTests.AsyncTests

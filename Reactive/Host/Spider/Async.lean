@@ -157,17 +157,18 @@ private partial def asyncWithRetryLoop (framedUpdate : AsyncState (RetryState ×
   catch e =>
     let errMsg := toString e
     let now ← IO.monoMsNow
-    let newState :=
-      if state.retryCount == 0 then
-        RetryState.initialFailure now errMsg
-      else
-        state.recordRetryFailure now errMsg
-
-    if newState.isExhausted config then
-      framedUpdate (AsyncState.error (newState, errMsg))
+    -- Check exhaustion with current state BEFORE incrementing
+    if state.retryCount >= config.maxRetries then
+      let finalState := { state with lastAttemptTime := now, lastError := some errMsg }
+      framedUpdate (AsyncState.error (finalState, errMsg))
     else
-      -- Wait for backoff delay then retry
-      let delayMs := newState.backoffDelayMs config
+      -- Increment retry count and retry
+      let newState : RetryState := {
+        retryCount := state.retryCount + 1
+        lastAttemptTime := now
+        lastError := some errMsg
+      }
+      let delayMs := state.backoffDelayMs config
       IO.sleep (UInt32.ofNat delayMs)
       asyncWithRetryLoop framedUpdate config action newState
 
@@ -204,17 +205,18 @@ private partial def asyncOnEventWithRetryLoop
 
     let errMsg := toString e
     let now ← IO.monoMsNow
-    let newState :=
-      if state.retryCount == 0 then
-        RetryState.initialFailure now errMsg
-      else
-        state.recordRetryFailure now errMsg
-
-    if newState.isExhausted config then
-      framedUpdate (AsyncState.error (newState, errMsg))
+    -- Check exhaustion with current state BEFORE incrementing
+    if state.retryCount >= config.maxRetries then
+      let finalState := { state with lastAttemptTime := now, lastError := some errMsg }
+      framedUpdate (AsyncState.error (finalState, errMsg))
     else
-      -- Wait for backoff delay then retry
-      let delayMs := newState.backoffDelayMs config
+      -- Increment retry count and retry
+      let newState : RetryState := {
+        retryCount := state.retryCount + 1
+        lastAttemptTime := now
+        lastError := some errMsg
+      }
+      let delayMs := state.backoffDelayMs config
       IO.sleep (UInt32.ofNat delayMs)
       asyncOnEventWithRetryLoop framedUpdate config generationRef action value generation newState
 
