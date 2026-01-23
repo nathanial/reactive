@@ -267,27 +267,63 @@ SpiderM.setErrorHandler fun err => do
 
 ### Worker Pool (FRP-based)
 
-Worker pool that processes jobs via a command event stream with observable state:
+FRP-based worker pool for async job processing with priority queue ordering and generation-based soft cancellation.
+
+**Type constraints:** `jobId` requires `BEq`, `Hashable`, `Inhabited`; `job` requires `Inhabited`
+
+#### Types
 
 ```lean
--- Command types for controlling the pool
+-- Configuration
+structure WorkerPoolConfig where
+  workerCount : Nat := 4  -- Number of worker threads
+
+-- Commands for controlling the pool
 inductive PoolCommand (jobId job : Type) where
   | submit (id : jobId) (job : job) (priority : Int)
   | cancel (id : jobId)
   | updatePriority (id : jobId) (newPriority : Int)
   | resubmit (id : jobId) (job : job) (priority : Int)
 
+-- Job statuses
+inductive JobStatus where
+  | pending | running | completed | cancelled | error
+
+-- Output structure with observable state
+structure PoolOutput (jobId job result : Type) where
+  completed : Evt (jobId × job × result)    -- Fires on successful completion
+  cancelled : Evt jobId                      -- Fires on cancellation
+  errored : Evt (jobId × String)            -- Fires on error
+  jobStates : Dyn (HashMap jobId JobStatus) -- All job statuses
+  pendingCount : Dyn Nat                     -- Jobs waiting in queue
+  runningCount : Dyn Nat                     -- Jobs currently processing
+```
+
+#### API
+
+| Function | Description |
+|----------|-------------|
+| `WorkerPool.fromCommands config process commands` | Create pool, returns `SpiderM (PoolOutput)` |
+| `WorkerPool.fromCommandsWithShutdown config process commands` | Create pool with shutdown handle, returns `SpiderM (PoolOutput × PoolHandle)` |
+
+#### Usage
+
+```lean
 -- Create pool from command stream
+let config : WorkerPoolConfig := { workerCount := 4 }
 let (cmdEvt, fireCmd) ← newTriggerEvent (a := PoolCommand Nat MyJob)
 let (pool, handle) ← WorkerPool.fromCommandsWithShutdown config process cmdEvt
 
+-- Or simpler version without shutdown handle
+let pool ← WorkerPool.fromCommands config process cmdEvt
+
 -- Observable outputs
-let _ ← pool.completed.subscribe fun (id, job, result) => ...  -- Fires on completion
-let _ ← pool.cancelled.subscribe fun id => ...                  -- Fires on cancellation
-let _ ← pool.errored.subscribe fun (id, errMsg) => ...          -- Fires on error
-let pending ← pool.pendingCount.sample                          -- Dynamic of pending count
-let running ← pool.runningCount.sample                          -- Dynamic of running count
-let states ← pool.jobStates.sample                              -- Dynamic of all job statuses
+let _ ← pool.completed.subscribe fun (id, job, result) => ...
+let _ ← pool.cancelled.subscribe fun id => ...
+let _ ← pool.errored.subscribe fun (id, errMsg) => ...
+let pending ← pool.pendingCount.sample
+let running ← pool.runningCount.sample
+let states ← pool.jobStates.sample
 
 -- Submit/cancel via commands
 fireCmd (.submit 1 myJob 5)       -- Submit job with ID 1, priority 5
@@ -295,11 +331,15 @@ fireCmd (.cancel 1)               -- Cancel job 1 (soft cancellation if running)
 fireCmd (.updatePriority 1 10)    -- Update priority of pending job
 fireCmd (.resubmit 1 newJob 5)    -- Cancel existing and submit fresh
 
--- Graceful shutdown
+-- Graceful shutdown (cancels all pending, closes signal channel)
 handle.shutdown
 ```
 
-Job statuses: `pending`, `running`, `completed`, `cancelled`, `error`
+#### Cancellation Semantics
+
+- **Pending jobs:** Removed from queue immediately
+- **Running jobs:** Soft cancellation via generation counters - the IO operation continues but its result is discarded
+- Higher priority values are processed first; FIFO ordering within same priority
 
 ---
 
