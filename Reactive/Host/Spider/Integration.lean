@@ -5,6 +5,7 @@
 -/
 import Reactive.Host.Spider.Core
 import Reactive.Host.Spider.Event
+import Std.Data.HashMap
 
 namespace Reactive.Host
 
@@ -32,25 +33,101 @@ def runWithReplaceRequester (computation : SpiderM (a × Event Spider (SpiderM a
   pure (initialResult, resultEvent)
 ⟩
 
-/-- Traverse a dynamic list, rebuilding results when the list changes.
-    Returns a Dynamic of results that updates whenever the input list changes.
+/-- Cache entry for incremental traversal: holds computed result and child scope for cleanup -/
+private structure CacheEntry (b : Type) where
+  /-- The computed result for this item -/
+  result : b
+  /-- Child scope for this item's subscriptions (disposed when item is removed) -/
+  scope : SubscriptionScope
 
-    Note: This rebuilds all results on each change. For incremental updates,
-    a more sophisticated implementation would be needed.
+/-- Traverse a dynamic list incrementally with key-based caching.
+
+    Returns a Dynamic of results that updates whenever the input list changes.
+    Uses keys to determine which items are new, unchanged, or removed:
+    - New items: `f` is run in a child scope, result is cached
+    - Unchanged items: cached result is reused (no recomputation)
+    - Removed items: child scope is disposed, entry is removed from cache
+
+    This is more efficient than rebuilding all results on each change,
+    especially for lists where most items remain unchanged.
+
+    **Parameters:**
+    - `getKey`: Extract a unique key from each item for identity tracking
+    - `f`: Transform function to apply to each item
+    - `dynList`: The dynamic list to traverse
+
+    **Example:**
+    ```
+    -- Traverse a list of users, keyed by user ID
+    let userWidgets ← traverseDynList (·.id) renderUser usersDyn
+    ```
+
     Subscription is registered with current scope. -/
-def traverseDynList (f : a → SpiderM b) (dynList : Dynamic Spider (List a))
+def traverseDynList [BEq k] [Hashable k]
+    (getKey : a → k)
+    (f : a → SpiderM b)
+    (dynList : Dynamic Spider (List a))
     : SpiderM (Dynamic Spider (List b)) := ⟨fun env => do
-  -- Get initial list and compute initial results
+  -- Cache: maps key to (result, scope)
+  let cacheRef ← IO.mkRef ({} : Std.HashMap k (CacheEntry b))
+
+  -- Process initial list
   let initialList ← dynList.sample
-  let initialResults ← initialList.mapM fun a => (f a).run env
+  let mut initialResults : List b := []
+  let mut initialCache : Std.HashMap k (CacheEntry b) := {}
+
+  for item in initialList do
+    let key := getKey item
+    -- Create child scope for this item
+    let childScope ← env.currentScope.child
+    -- Run f in the child scope
+    let result ← (f item).run { env with currentScope := childScope }
+    initialResults := initialResults ++ [result]
+    initialCache := initialCache.insert key { result, scope := childScope }
+
+  cacheRef.set initialCache
 
   -- Create result dynamic
   let (resultDyn, updateResult) ← createDynamic env.timelineCtx initialResults
 
-  -- Subscribe to list changes and rebuild results
+  -- Subscribe to list changes with diff-based processing
   let unsub ← Reactive.Event.subscribe dynList.updated fun newList => do
-    let newResults ← newList.mapM fun a => (f a).run env
+    let cache ← cacheRef.get
+
+    -- Compute current and new key sets
+    let newKeys := newList.map getKey
+    let newKeySet : Std.HashMap k Unit := newKeys.foldl (fun s k => s.insert k ()) {}
+
+    -- Find removed keys (in cache but not in new list)
+    let removedKeys := cache.fold (init := []) fun acc k _ =>
+      if newKeySet.contains k then acc else k :: acc
+
+    -- Dispose scopes for removed items
+    for key in removedKeys do
+      if let some entry := cache[key]? then
+        entry.scope.dispose
+
+    -- Build new cache and results
+    let mut newCache : Std.HashMap k (CacheEntry b) := {}
+    let mut newResults : List b := []
+
+    for item in newList do
+      let key := getKey item
+      match cache[key]? with
+      | some entry =>
+        -- Reuse cached result
+        newResults := newResults ++ [entry.result]
+        newCache := newCache.insert key entry
+      | none =>
+        -- New item: create scope and run f
+        let childScope ← env.currentScope.child
+        let result ← (f item).run { env with currentScope := childScope }
+        newResults := newResults ++ [result]
+        newCache := newCache.insert key { result, scope := childScope }
+
+    cacheRef.set newCache
     updateResult newResults
+
   env.currentScope.register unsub
 
   pure resultDyn
