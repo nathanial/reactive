@@ -21,6 +21,7 @@ inductive PoolCommand (jobId job : Type) where
   | cancel (id : jobId)
   | updatePriority (id : jobId) (newPriority : Int)
   | resubmit (id : jobId) (job : job) (priority : Int)
+  | submitDelayed (id : jobId) (job : job) (priority : Int) (delayMs : Nat)
   deriving Repr
 
 /-- Status of a job in the pool -/
@@ -71,14 +72,69 @@ structure PoolOutput (jobId job result : Type) [BEq jobId] [Hashable jobId] wher
   /-- Number of running jobs -/
   runningCount : Dyn Nat
 
+/-- Extended output with job start events for cancel handle support -/
+structure PoolOutputEx (jobId job result : Type) [BEq jobId] [Hashable jobId] where
+  /-- Base pool output -/
+  base : PoolOutput jobId job result
+  /-- Fires when a job starts processing -/
+  started : Evt jobId
+  /-- Fires when a cancelable job starts with its cancel handle -/
+  cancelableStarted : Evt (jobId × IO Unit)
+
+/-- Result of starting a cancelable job -/
+structure ProcessingHandle (result : Type) where
+  /-- The task that will produce the result -/
+  task : Task (Except IO.Error result)
+  /-- Optional IO action to cancel the underlying operation -/
+  cancelHandle : Option (IO Unit) := none
+
+/-- Processor configuration with optional cancel support -/
+structure ProcessorConfig (job result : Type) where
+  /-- Start processing a job, returning a handle with optional cancellation -/
+  startProcessing : job → IO (ProcessingHandle result)
+
+namespace ProcessorConfig
+
+/-- Create a simple processor config from a pure processing function -/
+def simple (process : job → IO result) : ProcessorConfig job result where
+  startProcessing := fun j => do
+    let task ← IO.asTask (prio := .dedicated) (process j)
+    return { task := task, cancelHandle := none }
+
+end ProcessorConfig
+
+/-- Result that can spawn follow-up jobs -/
+structure JobResult (jobId job result : Type) where
+  /-- The primary result of this job -/
+  result : result
+  /-- Follow-up jobs to enqueue: (id, job, priority) -/
+  followUps : Array (jobId × job × Int) := #[]
+
+/-- Processor that supports job chaining -/
+structure ChainableProcessor (jobId job result : Type) where
+  /-- Process a job and optionally produce follow-up jobs -/
+  process : job → IO (JobResult jobId job result)
+  /-- Optional: create a cancel handle for a job -/
+  createCancelHandle : Option (job → IO (Option (IO Unit))) := none
+
+namespace ChainableProcessor
+
+/-- Create a simple chainable processor that never produces follow-ups -/
+def simple (process : job → IO result) : ChainableProcessor jobId job result where
+  process := fun j => do
+    let r ← process j
+    return { result := r }
+
+end ChainableProcessor
+
 namespace WorkerPool
 
 /-- Internal state for the priority queue (max-heap by priority) -/
 private structure PoolState (jobId job : Type) [BEq jobId] [Hashable jobId] where
   /-- Binary heap of pending jobs -/
   pendingQueue : Array (PendingJob jobId job) := #[]
-  /-- Currently running jobs with generation counters -/
-  runningJobs : HashMap jobId (job × Nat) := {}
+  /-- Currently running jobs with generation counters and optional cancel handles -/
+  runningJobs : HashMap jobId (job × Nat × Option (IO Unit)) := {}
   /-- Job statuses for external observation -/
   statuses : HashMap jobId JobStatus := {}
   /-- Global generation counter per job ID -/
@@ -203,11 +259,11 @@ private def nextGeneration [BEq jobId] [Hashable jobId]
 
 /-- Result of attempting to cancel a job -/
 inductive CancelResult (jobId job : Type) [BEq jobId] [Hashable jobId] where
-  | cancelled (newState : PoolState jobId job)
+  | cancelled (newState : PoolState jobId job) (cancelAction : Option (IO Unit))
   | notFound
 
 /-- Try to cancel a job from state (either pending or running).
-    Returns the new state if cancelled, or notFound if job doesn't exist. -/
+    Returns the new state if cancelled with optional cancel action, or notFound if job doesn't exist. -/
 private def tryCancelJob [BEq jobId] [Hashable jobId] [Inhabited jobId] [Inhabited job]
     (st : PoolState jobId job) (id : jobId) : CancelResult jobId job :=
   let (queue', foundPending) := heapRemove st.pendingQueue id
@@ -219,19 +275,20 @@ private def tryCancelJob [BEq jobId] [Hashable jobId] [Inhabited jobId] [Inhabit
       statuses := statuses'
       generations := gens'
       version := st.version + 1
-    }
-  else if st.runningJobs.contains id then
-    let (_, gens') := nextGeneration st.generations id
-    let running' := st.runningJobs.erase id
-    let statuses' := st.statuses.insert id JobStatus.cancelled
-    .cancelled { st with
-      runningJobs := running'
-      statuses := statuses'
-      generations := gens'
-      version := st.version + 1
-    }
+    } none
   else
-    .notFound
+    match st.runningJobs[id]? with
+    | some (_, _, cancelHandle) =>
+      let (_, gens') := nextGeneration st.generations id
+      let running' := st.runningJobs.erase id
+      let statuses' := st.statuses.insert id JobStatus.cancelled
+      .cancelled { st with
+        runningJobs := running'
+        statuses := statuses'
+        generations := gens'
+        version := st.version + 1
+      } cancelHandle
+    | none => .notFound
 
 /-- Result of attempting to submit a job -/
 inductive SubmitResult (jobId job : Type) [BEq jobId] [Hashable jobId] where
@@ -295,7 +352,7 @@ private partial def workerLoopImplFixed [BEq jobId] [Hashable jobId] [Inhabited 
       | none => return none
       | some pendingJob =>
         let gen := st.generations[pendingJob.id]?.getD 0
-        let running' := st.runningJobs.insert pendingJob.id (pendingJob.payload, gen)
+        let running' := st.runningJobs.insert pendingJob.id (pendingJob.payload, gen, none)
         let statuses' := st.statuses.insert pendingJob.id JobStatus.running
         let newVersion := st.version + 1
         let st' := { st with
@@ -314,7 +371,7 @@ private partial def workerLoopImplFixed [BEq jobId] [Hashable jobId] [Inhabited 
       -- Update observables with version check to skip if stale
       updateAllInFrame stateAfterClaim stateVersion (pure ())
 
-      -- Process the job
+      -- Process the job (simple version - no cancel handle support)
       try
         let theResult ← process theJob
         -- Atomically check generation, update state with new version
@@ -447,13 +504,17 @@ def fromCommandsWithShutdown [BEq jobId] [Hashable jobId] [Inhabited jobId] [Inh
         let ms ← get
         let result := tryCancelJob ms.state id
         match result with
-        | .cancelled st' =>
+        | .cancelled st' _ =>
           modify fun ms => { ms with state := st' }
           return result
         | .notFound => return result
 
       match cancelResult with
-      | .cancelled st => updateAllInFrame st st.version (fireCancelled id)
+      | .cancelled st cancelAction =>
+        -- Invoke cancel handle if present (best-effort, don't wait)
+        if let some action := cancelAction then
+          let _ ← IO.asTask (prio := .default) (try action catch _ => pure ())
+        updateAllInFrame st st.version (fireCancelled id)
       | .notFound => pure ()
 
     | .updatePriority id newPriority =>
@@ -468,13 +529,17 @@ def fromCommandsWithShutdown [BEq jobId] [Hashable jobId] [Inhabited jobId] [Inh
         let ms ← get
         let result := tryCancelJob ms.state id
         match result with
-        | .cancelled st' =>
+        | .cancelled st' _ =>
           modify fun ms => { ms with state := st' }
           return result
         | .notFound => return result
 
       match cancelResult with
-      | .cancelled st => updateAllInFrame st st.version (fireCancelled id)
+      | .cancelled st cancelAction =>
+        -- Invoke cancel handle if present (best-effort, don't wait)
+        if let some action := cancelAction then
+          let _ ← IO.asTask (prio := .default) (try action catch _ => pure ())
+        updateAllInFrame st st.version (fireCancelled id)
       | .notFound => pure ()
 
       -- Now submit fresh (no duplicate check since we just cancelled)
@@ -493,6 +558,26 @@ def fromCommandsWithShutdown [BEq jobId] [Hashable jobId] [Inhabited jobId] [Inh
       | .success st =>
         updateObservablesInFrame st st.version
         signalWorker sig
+
+    | .submitDelayed id theJob priority delayMs =>
+      -- Spawn a task that waits and then submits
+      let _ ← IO.asTask (prio := .default) do
+        IO.sleep (UInt32.ofNat delayMs)
+        let (submitResult, sig) ← mutexState.atomically do
+          let ms ← get
+          let result := trySubmitJob ms.state id theJob priority
+          match result with
+          | .success st' =>
+            modify fun ms => { ms with state := st' }
+            return (result, ms.signal)
+          | _ => return (result, ms.signal)
+
+        match submitResult with
+        | .poolClosed => pure ()
+        | .duplicate => env.withFrame (fireErrored (id, "duplicate job ID"))
+        | .success st =>
+          updateObservablesInFrame st st.version
+          signalWorker sig
 
   let unsub ← Reactive.Event.subscribe commands processCommand
   env.currentScope.register unsub
@@ -564,6 +649,641 @@ def fromCommands [BEq jobId] [Hashable jobId] [Inhabited jobId] [Inhabited job]
     : SpiderM (PoolOutput jobId job result) := do
   let (output, _) ← fromCommandsWithShutdown config process commands
   return output
+
+/-- Worker loop with cancel handle support.
+    Uses ProcessorConfig to start jobs with optional cancellation. -/
+private partial def workerLoopWithCancel [BEq jobId] [Hashable jobId] [Inhabited jobId] [Inhabited job]
+    (mutexState : Std.Mutex (MutexState jobId job))
+    (env : SpiderEnv)
+    (lastPublishedVersion : Std.Mutex Nat)
+    (updateAllInFrame : PoolState jobId job → Nat → IO Unit → IO Unit)
+    (processor : ProcessorConfig job result)
+    (fireCompleted : (jobId × job × result) → IO Unit)
+    (fireErrored : (jobId × String) → IO Unit)
+    (fireCancelled : jobId → IO Unit)
+    (fireStarted : jobId → IO Unit)
+    (fireCancelableStarted : (jobId × IO Unit) → IO Unit)
+    : IO Unit := do
+  -- Wait for signal
+  let signal? ← mutexState.atomically do
+    let ms ← get
+    return ms.signal
+  let sig? ← signal?.recv
+  match sig? with
+  | none => return ()  -- Pool closed
+  | some () =>
+    -- Try to claim a job
+    let claimed? ← mutexState.atomically do
+      let ms ← get
+      let st := ms.state
+      if st.closed then return none
+      let (theJob?, queue') := heapPop? st.pendingQueue
+      match theJob? with
+      | none => return none
+      | some pendingJob =>
+        let gen := st.generations[pendingJob.id]?.getD 0
+        -- Initially no cancel handle - will be added once processing starts
+        let running' := st.runningJobs.insert pendingJob.id (pendingJob.payload, gen, none)
+        let statuses' := st.statuses.insert pendingJob.id JobStatus.running
+        let newVersion := st.version + 1
+        let st' := { st with
+          pendingQueue := queue'
+          runningJobs := running'
+          statuses := statuses'
+          version := newVersion
+        }
+        modify fun ms => { ms with state := st' }
+        return some (pendingJob.id, pendingJob.payload, gen, st', newVersion)
+
+    match claimed? with
+    | none =>
+      workerLoopWithCancel mutexState env lastPublishedVersion updateAllInFrame processor fireCompleted fireErrored fireCancelled fireStarted fireCancelableStarted
+    | some (id, theJob, generation, stateAfterClaim, stateVersion) =>
+      -- Update observables and fire started event
+      updateAllInFrame stateAfterClaim stateVersion (fireStarted id)
+
+      -- Start processing with ProcessorConfig
+      let handle ← processor.startProcessing theJob
+
+      -- If there's a cancel handle, store it and fire cancelableStarted
+      if let some cancelAction := handle.cancelHandle then
+        let stateWithHandle? ← mutexState.atomically do
+          let ms ← get
+          let gen := ms.state.generations[id]?.getD 0
+          if gen == generation then
+            -- Update running job to include cancel handle
+            match ms.state.runningJobs[id]? with
+            | some (job, g, _) =>
+              let running' := ms.state.runningJobs.insert id (job, g, some cancelAction)
+              let newVersion := ms.state.version + 1
+              let st' := { ms.state with runningJobs := running', version := newVersion }
+              modify fun ms => { ms with state := st' }
+              return some (st', newVersion)
+            | none => return none
+          else
+            return none
+
+        match stateWithHandle? with
+        | some (st, ver) => updateAllInFrame st ver (fireCancelableStarted (id, cancelAction))
+        | none => pure ()
+
+      -- Wait for the task to complete
+      let taskResult ← IO.wait handle.task
+
+      -- Process result
+      match taskResult with
+      | .ok theResult =>
+        let shouldFire ← mutexState.atomically do
+          let ms ← get
+          let gen := ms.state.generations[id]?.getD 0
+          if gen == generation then
+            let running' := ms.state.runningJobs.erase id
+            let statuses' := ms.state.statuses.insert id JobStatus.completed
+            let newVersion := ms.state.version + 1
+            let st' := { ms.state with runningJobs := running', statuses := statuses', version := newVersion }
+            modify fun ms => { ms with state := st' }
+            return some (st', newVersion)
+          else
+            return none
+
+        match shouldFire with
+        | some (st, ver) => updateAllInFrame st ver (fireCompleted (id, theJob, theResult))
+        | none => pure ()
+
+      | .error e =>
+        let shouldFire ← mutexState.atomically do
+          let ms ← get
+          let gen := ms.state.generations[id]?.getD 0
+          if gen == generation then
+            let running' := ms.state.runningJobs.erase id
+            let statuses' := ms.state.statuses.insert id JobStatus.error
+            let newVersion := ms.state.version + 1
+            let st' := { ms.state with runningJobs := running', statuses := statuses', version := newVersion }
+            modify fun ms => { ms with state := st' }
+            return some (st', newVersion)
+          else
+            return none
+
+        match shouldFire with
+        | some (st, ver) => updateAllInFrame st ver (fireErrored (id, toString e))
+        | none => pure ()
+
+      workerLoopWithCancel mutexState env lastPublishedVersion updateAllInFrame processor fireCompleted fireErrored fireCancelled fireStarted fireCancelableStarted
+
+/-- Create an FRP-based worker pool with cancel handle support.
+
+    Uses ProcessorConfig to start jobs with optional IO cancellation handles.
+    Returns PoolOutputEx with started/cancelableStarted events.
+
+    **Cancellation semantics**: When a cancel handle is available, the pool will
+    invoke it when the job is cancelled. The underlying IO operation should
+    respond to the cancellation signal appropriately. -/
+def fromCommandsWithCancel [BEq jobId] [Hashable jobId] [Inhabited jobId] [Inhabited job]
+    (config : WorkerPoolConfig)
+    (processor : ProcessorConfig job result)
+    (commands : Evt (PoolCommand jobId job))
+    : SpiderM (PoolOutputEx jobId job result × PoolHandle) := ⟨fun env => do
+  -- Create trigger events for outputs
+  let (completedEvt, fireCompleted) ← Event.newTrigger env.timelineCtx
+  let (cancelledEvt, fireCancelled) ← Event.newTrigger env.timelineCtx
+  let (erroredEvt, fireErrored) ← Event.newTrigger env.timelineCtx
+  let (startedEvt, fireStarted) ← Event.newTrigger env.timelineCtx
+  let (cancelableStartedEvt, fireCancelableStarted) ← Event.newTrigger env.timelineCtx
+
+  -- Create dynamics for observable state
+  let (jobStatesDyn, updateJobStates) ← createDynamic env.timelineCtx ({} : HashMap jobId JobStatus)
+  let (pendingCountDyn, updatePendingCount) ← createDynamic env.timelineCtx (0 : Nat)
+  let (runningCountDyn, updateRunningCount) ← createDynamic env.timelineCtx (0 : Nat)
+
+  -- Internal mutex-protected state
+  let mutexState ← MutexState.new (jobId := jobId) (job := job)
+  let lastPublishedVersion ← Std.Mutex.new (0 : Nat)
+
+  let updateAllInFrame := fun (st : PoolState jobId job) (stateVersion : Nat) (fireAction : IO Unit) =>
+    env.withFrame do
+      fireAction
+      let shouldUpdateState ← lastPublishedVersion.atomically do
+        let lastVer ← get
+        if stateVersion > lastVer then
+          set stateVersion
+          return true
+        else
+          return false
+      if shouldUpdateState then
+        updateJobStates st.statuses
+        updatePendingCount st.pendingQueue.size
+        updateRunningCount st.runningJobs.size
+
+  let updateObservablesInFrame := fun (st : PoolState jobId job) (ver : Nat) =>
+    updateAllInFrame st ver (pure ())
+
+  -- Worker loop with cancel support
+  let workerLoop : IO Unit := workerLoopWithCancel mutexState env lastPublishedVersion updateAllInFrame processor fireCompleted fireErrored fireCancelled fireStarted fireCancelableStarted
+
+  -- Spawn workers
+  for _ in [0:config.workerCount] do
+    let _ ← IO.asTask (prio := .dedicated) workerLoop
+
+  let signalWorker := fun (sig : Std.CloseableChannel.Sync Unit) => do
+    try let _ ← sig.send () catch _ => pure ()
+
+  -- Process commands (same as fromCommandsWithShutdown)
+  let processCommand := fun (cmd : PoolCommand jobId job) => do
+    match cmd with
+    | .submit id theJob priority =>
+      let (submitResult, sig) ← mutexState.atomically do
+        let ms ← get
+        let result := trySubmitJob ms.state id theJob priority
+        match result with
+        | .success st' =>
+          modify fun ms => { ms with state := st' }
+          return (result, ms.signal)
+        | _ => return (result, ms.signal)
+
+      match submitResult with
+      | .poolClosed => pure ()
+      | .duplicate => env.withFrame (fireErrored (id, "duplicate job ID"))
+      | .success st =>
+        updateObservablesInFrame st st.version
+        signalWorker sig
+
+    | .cancel id =>
+      let cancelResult ← mutexState.atomically do
+        let ms ← get
+        let result := tryCancelJob ms.state id
+        match result with
+        | .cancelled st' _ =>
+          modify fun ms => { ms with state := st' }
+          return result
+        | .notFound => return result
+
+      match cancelResult with
+      | .cancelled st cancelAction =>
+        if let some action := cancelAction then
+          let _ ← IO.asTask (prio := .default) (try action catch _ => pure ())
+        updateAllInFrame st st.version (fireCancelled id)
+      | .notFound => pure ()
+
+    | .updatePriority id newPriority =>
+      mutexState.atomically do
+        let ms ← get
+        let queue' := heapUpdatePriority ms.state.pendingQueue id newPriority
+        modify fun ms => { ms with state := { ms.state with pendingQueue := queue' } }
+
+    | .resubmit id theJob priority =>
+      let cancelResult ← mutexState.atomically do
+        let ms ← get
+        let result := tryCancelJob ms.state id
+        match result with
+        | .cancelled st' _ =>
+          modify fun ms => { ms with state := st' }
+          return result
+        | .notFound => return result
+
+      match cancelResult with
+      | .cancelled st cancelAction =>
+        if let some action := cancelAction then
+          let _ ← IO.asTask (prio := .default) (try action catch _ => pure ())
+        updateAllInFrame st st.version (fireCancelled id)
+      | .notFound => pure ()
+
+      let (submitResult, sig) ← mutexState.atomically do
+        let ms ← get
+        let result := trySubmitJob ms.state id theJob priority (checkDuplicate := false)
+        match result with
+        | .success st' =>
+          modify fun ms => { ms with state := st' }
+          return (result, ms.signal)
+        | _ => return (result, ms.signal)
+
+      match submitResult with
+      | .poolClosed => pure ()
+      | .duplicate => pure ()
+      | .success st =>
+        updateObservablesInFrame st st.version
+        signalWorker sig
+
+    | .submitDelayed id theJob priority delayMs =>
+      let _ ← IO.asTask (prio := .default) do
+        IO.sleep (UInt32.ofNat delayMs)
+        let (submitResult, sig) ← mutexState.atomically do
+          let ms ← get
+          let result := trySubmitJob ms.state id theJob priority
+          match result with
+          | .success st' =>
+            modify fun ms => { ms with state := st' }
+            return (result, ms.signal)
+          | _ => return (result, ms.signal)
+
+        match submitResult with
+        | .poolClosed => pure ()
+        | .duplicate => env.withFrame (fireErrored (id, "duplicate job ID"))
+        | .success st =>
+          updateObservablesInFrame st st.version
+          signalWorker sig
+
+  let unsub ← Reactive.Event.subscribe commands processCommand
+  env.currentScope.register unsub
+
+  let shutdownHandle : PoolHandle := {
+    shutdown := do
+      let (sigChan, pendingIds, finalState, finalVersion) ← mutexState.atomically do
+        let ms ← get
+        let pendingIds := ms.state.pendingQueue.map (·.id)
+        let statuses' := pendingIds.foldl (fun acc id => acc.insert id JobStatus.cancelled) ms.state.statuses
+        let newVersion := ms.state.version + 1
+        let st' := { ms.state with
+          closed := true
+          pendingQueue := #[]
+          statuses := statuses'
+          version := newVersion
+        }
+        modify fun ms => { ms with state := st' }
+        return (ms.signal, pendingIds, st', newVersion)
+
+      env.withFrame do
+        for id in pendingIds do
+          fireCancelled id
+        let shouldUpdateState ← lastPublishedVersion.atomically do
+          let lastVer ← get
+          if finalVersion > lastVer then
+            set finalVersion
+            return true
+          else
+            return false
+        if shouldUpdateState then
+          updateJobStates finalState.statuses
+          updatePendingCount finalState.pendingQueue.size
+          updateRunningCount finalState.runningJobs.size
+
+      try let _ ← sigChan.close catch _ => pure ()
+  }
+
+  return ({
+    base := {
+      completed := completedEvt
+      cancelled := cancelledEvt
+      errored := erroredEvt
+      jobStates := jobStatesDyn
+      pendingCount := pendingCountDyn
+      runningCount := runningCountDyn
+    }
+    started := startedEvt
+    cancelableStarted := cancelableStartedEvt
+  }, shutdownHandle)⟩
+
+/-- Worker loop with job chaining support.
+    Uses ChainableProcessor to process jobs and enqueue follow-ups. -/
+private partial def workerLoopChainable [BEq jobId] [Hashable jobId] [Inhabited jobId] [Inhabited job]
+    (mutexState : Std.Mutex (MutexState jobId job))
+    (env : SpiderEnv)
+    (lastPublishedVersion : Std.Mutex Nat)
+    (updateAllInFrame : PoolState jobId job → Nat → IO Unit → IO Unit)
+    (processor : ChainableProcessor jobId job result)
+    (fireCompleted : (jobId × job × result) → IO Unit)
+    (fireErrored : (jobId × String) → IO Unit)
+    (fireCancelled : jobId → IO Unit)
+    (signalWorker : Std.CloseableChannel.Sync Unit → IO Unit)
+    : IO Unit := do
+  -- Wait for signal
+  let signal? ← mutexState.atomically do
+    let ms ← get
+    return ms.signal
+  let sig? ← signal?.recv
+  match sig? with
+  | none => return ()  -- Pool closed
+  | some () =>
+    -- Try to claim a job
+    let claimed? ← mutexState.atomically do
+      let ms ← get
+      let st := ms.state
+      if st.closed then return none
+      let (theJob?, queue') := heapPop? st.pendingQueue
+      match theJob? with
+      | none => return none
+      | some pendingJob =>
+        let gen := st.generations[pendingJob.id]?.getD 0
+        -- Get cancel handle if processor supports it
+        let cancelHandle ← match processor.createCancelHandle with
+          | some mkHandle => mkHandle pendingJob.payload
+          | none => pure none
+        let running' := st.runningJobs.insert pendingJob.id (pendingJob.payload, gen, cancelHandle)
+        let statuses' := st.statuses.insert pendingJob.id JobStatus.running
+        let newVersion := st.version + 1
+        let st' := { st with
+          pendingQueue := queue'
+          runningJobs := running'
+          statuses := statuses'
+          version := newVersion
+        }
+        modify fun ms => { ms with state := st' }
+        return some (pendingJob.id, pendingJob.payload, gen, st', newVersion, ms.signal)
+
+    match claimed? with
+    | none =>
+      workerLoopChainable mutexState env lastPublishedVersion updateAllInFrame processor fireCompleted fireErrored fireCancelled signalWorker
+    | some (id, theJob, generation, stateAfterClaim, stateVersion, sigChan) =>
+      updateAllInFrame stateAfterClaim stateVersion (pure ())
+
+      -- Process the job
+      try
+        let jobResult ← processor.process theJob
+
+        -- Atomically check generation, update state, and enqueue follow-ups
+        let shouldFire ← mutexState.atomically do
+          let ms ← get
+          let gen := ms.state.generations[id]?.getD 0
+          if gen == generation then
+            let running' := ms.state.runningJobs.erase id
+            let statuses' := ms.state.statuses.insert id JobStatus.completed
+            let newVersion := ms.state.version + 1
+
+            -- Enqueue follow-up jobs
+            let (queue', seq', statuses'') := jobResult.followUps.foldl
+              (fun (q, seq, sts) (followId, followJob, followPriority) =>
+                let pendingJob : PendingJob jobId job := {
+                  id := followId
+                  priority := { priority := followPriority, sequence := seq }
+                  payload := followJob
+                }
+                (heapInsert q pendingJob, seq + 1, sts.insert followId JobStatus.pending))
+              (ms.state.pendingQueue, ms.state.nextSequence, statuses')
+
+            let st' := { ms.state with
+              runningJobs := running'
+              pendingQueue := queue'
+              statuses := statuses''
+              nextSequence := seq'
+              version := newVersion
+            }
+            modify fun ms => { ms with state := st' }
+            return some (st', newVersion, jobResult.followUps.size)
+          else
+            return none
+
+        match shouldFire with
+        | some (st, ver, numFollowUps) =>
+          updateAllInFrame st ver (fireCompleted (id, theJob, jobResult.result))
+          -- Signal workers for follow-up jobs
+          for _ in [0:numFollowUps] do
+            signalWorker sigChan
+        | none => pure ()
+
+      catch e =>
+        let shouldFire ← mutexState.atomically do
+          let ms ← get
+          let gen := ms.state.generations[id]?.getD 0
+          if gen == generation then
+            let running' := ms.state.runningJobs.erase id
+            let statuses' := ms.state.statuses.insert id JobStatus.error
+            let newVersion := ms.state.version + 1
+            let st' := { ms.state with runningJobs := running', statuses := statuses', version := newVersion }
+            modify fun ms => { ms with state := st' }
+            return some (st', newVersion)
+          else
+            return none
+
+        match shouldFire with
+        | some (st, ver) => updateAllInFrame st ver (fireErrored (id, toString e))
+        | none => pure ()
+
+      workerLoopChainable mutexState env lastPublishedVersion updateAllInFrame processor fireCompleted fireErrored fireCancelled signalWorker
+
+/-- Create an FRP-based worker pool with job chaining support.
+
+    Uses ChainableProcessor to process jobs that can spawn follow-up jobs.
+    Follow-up jobs are automatically enqueued when a job completes.
+
+    **Chaining semantics**: When a job completes successfully, any follow-up jobs
+    specified in the JobResult are enqueued with their specified priorities.
+    Follow-ups are only enqueued if the original job completes (not cancelled/error). -/
+def fromCommandsChainable [BEq jobId] [Hashable jobId] [Inhabited jobId] [Inhabited job]
+    (config : WorkerPoolConfig)
+    (processor : ChainableProcessor jobId job result)
+    (commands : Evt (PoolCommand jobId job))
+    : SpiderM (PoolOutput jobId job result × PoolHandle) := ⟨fun env => do
+  -- Create trigger events for outputs
+  let (completedEvt, fireCompleted) ← Event.newTrigger env.timelineCtx
+  let (cancelledEvt, fireCancelled) ← Event.newTrigger env.timelineCtx
+  let (erroredEvt, fireErrored) ← Event.newTrigger env.timelineCtx
+
+  -- Create dynamics for observable state
+  let (jobStatesDyn, updateJobStates) ← createDynamic env.timelineCtx ({} : HashMap jobId JobStatus)
+  let (pendingCountDyn, updatePendingCount) ← createDynamic env.timelineCtx (0 : Nat)
+  let (runningCountDyn, updateRunningCount) ← createDynamic env.timelineCtx (0 : Nat)
+
+  -- Internal mutex-protected state
+  let mutexState ← MutexState.new (jobId := jobId) (job := job)
+  let lastPublishedVersion ← Std.Mutex.new (0 : Nat)
+
+  let updateAllInFrame := fun (st : PoolState jobId job) (stateVersion : Nat) (fireAction : IO Unit) =>
+    env.withFrame do
+      fireAction
+      let shouldUpdateState ← lastPublishedVersion.atomically do
+        let lastVer ← get
+        if stateVersion > lastVer then
+          set stateVersion
+          return true
+        else
+          return false
+      if shouldUpdateState then
+        updateJobStates st.statuses
+        updatePendingCount st.pendingQueue.size
+        updateRunningCount st.runningJobs.size
+
+  let updateObservablesInFrame := fun (st : PoolState jobId job) (ver : Nat) =>
+    updateAllInFrame st ver (pure ())
+
+  let signalWorker := fun (sig : Std.CloseableChannel.Sync Unit) => do
+    try let _ ← sig.send () catch _ => pure ()
+
+  -- Worker loop with chaining support
+  let workerLoop : IO Unit := workerLoopChainable mutexState env lastPublishedVersion updateAllInFrame processor fireCompleted fireErrored fireCancelled signalWorker
+
+  -- Spawn workers
+  for _ in [0:config.workerCount] do
+    let _ ← IO.asTask (prio := .dedicated) workerLoop
+
+  -- Process commands (same as fromCommandsWithShutdown)
+  let processCommand := fun (cmd : PoolCommand jobId job) => do
+    match cmd with
+    | .submit id theJob priority =>
+      let (submitResult, sig) ← mutexState.atomically do
+        let ms ← get
+        let result := trySubmitJob ms.state id theJob priority
+        match result with
+        | .success st' =>
+          modify fun ms => { ms with state := st' }
+          return (result, ms.signal)
+        | _ => return (result, ms.signal)
+
+      match submitResult with
+      | .poolClosed => pure ()
+      | .duplicate => env.withFrame (fireErrored (id, "duplicate job ID"))
+      | .success st =>
+        updateObservablesInFrame st st.version
+        signalWorker sig
+
+    | .cancel id =>
+      let cancelResult ← mutexState.atomically do
+        let ms ← get
+        let result := tryCancelJob ms.state id
+        match result with
+        | .cancelled st' _ =>
+          modify fun ms => { ms with state := st' }
+          return result
+        | .notFound => return result
+
+      match cancelResult with
+      | .cancelled st cancelAction =>
+        if let some action := cancelAction then
+          let _ ← IO.asTask (prio := .default) (try action catch _ => pure ())
+        updateAllInFrame st st.version (fireCancelled id)
+      | .notFound => pure ()
+
+    | .updatePriority id newPriority =>
+      mutexState.atomically do
+        let ms ← get
+        let queue' := heapUpdatePriority ms.state.pendingQueue id newPriority
+        modify fun ms => { ms with state := { ms.state with pendingQueue := queue' } }
+
+    | .resubmit id theJob priority =>
+      let cancelResult ← mutexState.atomically do
+        let ms ← get
+        let result := tryCancelJob ms.state id
+        match result with
+        | .cancelled st' _ =>
+          modify fun ms => { ms with state := st' }
+          return result
+        | .notFound => return result
+
+      match cancelResult with
+      | .cancelled st cancelAction =>
+        if let some action := cancelAction then
+          let _ ← IO.asTask (prio := .default) (try action catch _ => pure ())
+        updateAllInFrame st st.version (fireCancelled id)
+      | .notFound => pure ()
+
+      let (submitResult, sig) ← mutexState.atomically do
+        let ms ← get
+        let result := trySubmitJob ms.state id theJob priority (checkDuplicate := false)
+        match result with
+        | .success st' =>
+          modify fun ms => { ms with state := st' }
+          return (result, ms.signal)
+        | _ => return (result, ms.signal)
+
+      match submitResult with
+      | .poolClosed => pure ()
+      | .duplicate => pure ()
+      | .success st =>
+        updateObservablesInFrame st st.version
+        signalWorker sig
+
+    | .submitDelayed id theJob priority delayMs =>
+      let _ ← IO.asTask (prio := .default) do
+        IO.sleep (UInt32.ofNat delayMs)
+        let (submitResult, sig) ← mutexState.atomically do
+          let ms ← get
+          let result := trySubmitJob ms.state id theJob priority
+          match result with
+          | .success st' =>
+            modify fun ms => { ms with state := st' }
+            return (result, ms.signal)
+          | _ => return (result, ms.signal)
+
+        match submitResult with
+        | .poolClosed => pure ()
+        | .duplicate => env.withFrame (fireErrored (id, "duplicate job ID"))
+        | .success st =>
+          updateObservablesInFrame st st.version
+          signalWorker sig
+
+  let unsub ← Reactive.Event.subscribe commands processCommand
+  env.currentScope.register unsub
+
+  let shutdownHandle : PoolHandle := {
+    shutdown := do
+      let (sigChan, pendingIds, finalState, finalVersion) ← mutexState.atomically do
+        let ms ← get
+        let pendingIds := ms.state.pendingQueue.map (·.id)
+        let statuses' := pendingIds.foldl (fun acc id => acc.insert id JobStatus.cancelled) ms.state.statuses
+        let newVersion := ms.state.version + 1
+        let st' := { ms.state with
+          closed := true
+          pendingQueue := #[]
+          statuses := statuses'
+          version := newVersion
+        }
+        modify fun ms => { ms with state := st' }
+        return (ms.signal, pendingIds, st', newVersion)
+
+      env.withFrame do
+        for id in pendingIds do
+          fireCancelled id
+        let shouldUpdateState ← lastPublishedVersion.atomically do
+          let lastVer ← get
+          if finalVersion > lastVer then
+            set finalVersion
+            return true
+          else
+            return false
+        if shouldUpdateState then
+          updateJobStates finalState.statuses
+          updatePendingCount finalState.pendingQueue.size
+          updateRunningCount finalState.runningJobs.size
+
+      try let _ ← sigChan.close catch _ => pure ()
+  }
+
+  return ({
+    completed := completedEvt
+    cancelled := cancelledEvt
+    errored := erroredEvt
+    jobStates := jobStatesDyn
+    pendingCount := pendingCountDyn
+    runningCount := runningCountDyn
+  }, shutdownHandle)⟩
 
 end WorkerPool
 

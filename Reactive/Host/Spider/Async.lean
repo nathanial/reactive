@@ -5,12 +5,15 @@
   event-driven async, and retry logic.
 -/
 import Reactive.Host.Spider.Core
+import Reactive.Host.Spider.WorkerPool
 import Reactive.Core.AsyncState
 import Reactive.Core.Retry
+import Std.Data.HashMap
 
 namespace Reactive.Host
 
 open Reactive
+open Std (HashMap)
 
 /-! ## Pattern 1: Push-Based State
 
@@ -260,5 +263,173 @@ def asyncOnEventWithRetry (config : RetryConfig) (event : Evt a) (action : a →
 
   env.currentScope.register unsub
   pure dyn⟩
+
+/-! ## Pattern 4: Pool-Level Retry Scheduling
+
+Combinator that wraps pool output to add retry logic with exponential backoff. -/
+
+/-- State for tracking pending retry operations per job -/
+private structure RetryJobState where
+  /-- Current retry count -/
+  retryCount : Nat := 0
+  /-- Task handle for delayed retry (for cancellation) -/
+  retryTask : Option (Task (Except IO.Error Unit)) := none
+
+/-- Output from the retry scheduler -/
+structure RetryScheduler (jobId : Type) where
+  /-- Fires when a retry is scheduled: (jobId, delayMs) -/
+  retryScheduled : Evt (jobId × Nat)
+  /-- Fires when retries are exhausted: (jobId, lastError) -/
+  exhausted : Evt (jobId × String)
+  /-- Cancel any pending retry for a job -/
+  cancelRetry : jobId → IO Unit
+
+/-- Add retry scheduling to a pool output.
+
+    When the pool's `errored` event fires, this combinator:
+    1. Checks if `shouldRetry` returns true for the error
+    2. Schedules a delayed resubmit with exponential backoff
+    3. Fires `retryScheduled` when scheduling, `exhausted` when giving up
+
+    **Cancel behavior**: Calling `cancelRetry` cancels any pending retry for that job.
+    New errors for the same job ID reset the retry state. -/
+def withRetryScheduling [BEq jobId] [Hashable jobId]
+    (config : RetryConfig)
+    (shouldRetry : jobId × String → Bool)
+    (resubmitJob : jobId → job)
+    (poolOutput : PoolOutput jobId job result)
+    (commandTrigger : PoolCommand jobId job → IO Unit)
+    : SpiderM (RetryScheduler jobId) := ⟨fun env => do
+  let (retryScheduledEvt, fireRetryScheduled) ← Event.newTrigger env.timelineCtx
+  let (exhaustedEvt, fireExhausted) ← Event.newTrigger env.timelineCtx
+
+  -- Track retry state per job
+  let stateRef ← IO.mkRef ({} : HashMap jobId RetryJobState)
+
+  let cancelRetryImpl := fun (id : jobId) => do
+    let state ← stateRef.get
+    match state[id]? with
+    | some _ =>
+      -- We can't actually cancel the Task, but we can remove the state
+      -- so when the retry fires, it will be ignored
+      stateRef.modify (·.erase id)
+    | none => pure ()
+
+  -- Subscribe to errors and schedule retries
+  let unsub ← Reactive.Event.subscribe poolOutput.errored fun (id, errMsg) => do
+    if shouldRetry (id, errMsg) then
+      let state ← stateRef.get
+      let currentRetry := (state[id]?.map (·.retryCount)).getD 0
+
+      if currentRetry >= config.maxRetries then
+        -- Exhausted - fire event and clear state
+        stateRef.modify (·.erase id)
+        env.withFrame (fireExhausted (id, errMsg))
+      else
+        -- Schedule retry
+        let retryState : RetryState := { retryCount := currentRetry }
+        let delayMs := retryState.backoffDelayMs config
+
+        -- Spawn delayed retry task
+        let retryTask ← IO.asTask (prio := .default) do
+          IO.sleep (UInt32.ofNat delayMs)
+          -- Check if this retry is still valid (not cancelled)
+          let state ← stateRef.get
+          match state[id]? with
+          | some jobState =>
+            if jobState.retryCount == currentRetry then
+              -- Still valid, increment retry count and resubmit
+              stateRef.modify (·.insert id { retryCount := currentRetry + 1, retryTask := none })
+              let job := resubmitJob id
+              commandTrigger (.resubmit id job 0)
+          | none => pure ()  -- Cancelled
+
+        -- Store state with task handle
+        stateRef.modify (·.insert id { retryCount := currentRetry, retryTask := some retryTask })
+
+        -- Fire scheduled event
+        env.withFrame (fireRetryScheduled (id, delayMs))
+    else
+      -- Not retryable - just clear any existing state
+      stateRef.modify (·.erase id)
+
+  -- Clear retry state on successful completion or explicit cancellation
+  let unsubComplete ← Reactive.Event.subscribe poolOutput.completed fun (id, _, _) =>
+    stateRef.modify (·.erase id)
+  let unsubCancel ← Reactive.Event.subscribe poolOutput.cancelled fun id =>
+    stateRef.modify (·.erase id)
+
+  env.currentScope.register unsub
+  env.currentScope.register unsubComplete
+  env.currentScope.register unsubCancel
+
+  return {
+    retryScheduled := retryScheduledEvt
+    exhausted := exhaustedEvt
+    cancelRetry := cancelRetryImpl
+  }⟩
+
+/-! ## Pattern 5: Two-Tier Cache Combinator
+
+Wraps a processor to check fast/slow caches before processing. -/
+
+/-- Configuration for two-tier caching -/
+structure CacheConfig (key result cached : Type) where
+  /-- Try to get from fast cache (e.g., memory) -/
+  tryFastCache : key → IO (Option cached)
+  /-- Try to get from slow cache (e.g., disk) -/
+  trySlowCache : key → IO (Option cached)
+  /-- Promote from slow cache to fast cache -/
+  promoteToFast : key → cached → IO Unit
+  /-- Save result to both caches -/
+  saveToCache : key → result → cached → IO Unit
+  /-- Convert cached value to result -/
+  cachedToResult : cached → IO result
+
+/-- Wrap a processor with two-tier caching.
+
+    Cache lookup order:
+    1. Fast cache (memory) - returns immediately if hit
+    2. Slow cache (disk) - promotes to fast cache on hit
+    3. Process job - saves to both caches on completion
+
+    **Error handling**: Cache errors are logged but don't fail the job.
+    Processing errors propagate normally. -/
+def withTwoTierCache
+    (cacheConfig : CacheConfig key result cached)
+    (getKey : job → key)
+    (processor : job → IO result)
+    (onResult : result → IO cached)
+    : job → IO result := fun theJob => do
+  let key := getKey theJob
+
+  -- Try fast cache
+  try
+    match ← cacheConfig.tryFastCache key with
+    | some cachedVal => return ← cacheConfig.cachedToResult cachedVal
+    | none => pure ()
+  catch e =>
+    IO.eprintln s!"Fast cache error for key: {e}"
+
+  -- Try slow cache
+  try
+    match ← cacheConfig.trySlowCache key with
+    | some cachedVal =>
+      -- Promote to fast cache
+      try cacheConfig.promoteToFast key cachedVal catch _ => pure ()
+      return ← cacheConfig.cachedToResult cachedVal
+    | none => pure ()
+  catch e =>
+    IO.eprintln s!"Slow cache error for key: {e}"
+
+  -- Process and cache
+  let result ← processor theJob
+  try
+    let cached ← onResult result
+    cacheConfig.saveToCache key result cached
+  catch e =>
+    IO.eprintln s!"Cache save error for key: {e}"
+
+  return result
 
 end Reactive.Host

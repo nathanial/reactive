@@ -939,4 +939,250 @@ test "mixed async operations under load" := do
 
   shouldBe result 40
 
+/-! ## Extended Pool Features Tests -/
+
+test "fromCommandsWithCancel fires started event" := do
+  let result ← runSpider do
+    let config : WorkerPoolConfig := { workerCount := 1 }
+    let (cmdEvt, fireCmd) ← newTriggerEvent (t := Spider) (a := PoolCommand Nat Nat)
+
+    -- Create processor config
+    let processor : ProcessorConfig Nat Nat := ProcessorConfig.simple fun n => do
+      IO.sleep 20
+      pure (n * 2)
+
+    let (poolEx, handle) ← WorkerPool.fromCommandsWithCancel config processor cmdEvt
+
+    let startedRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
+    let completedRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
+
+    let _ ← poolEx.started.subscribe fun id =>
+      startedRef.modify (· ++ [id])
+    let _ ← poolEx.base.completed.subscribe fun (id, _, _) =>
+      completedRef.modify (· ++ [id])
+
+    SpiderM.liftIO <| fireCmd (.submit 1 10 0)
+    SpiderM.liftIO <| fireCmd (.submit 2 20 0)
+
+    -- Wait for completion
+    let _ ← SpiderM.liftIO <| waitUntil (do
+      let completed ← completedRef.get
+      return completed.length >= 2) 500
+
+    SpiderM.liftIO handle.shutdown
+
+    let started ← SpiderM.liftIO startedRef.get
+    let completed ← SpiderM.liftIO completedRef.get
+    pure (started.length, completed.length)
+
+  -- Both jobs should have fired started and completed events
+  shouldBe result.fst 2
+  shouldBe result.snd 2
+
+test "fromCommandsChainable enqueues follow-up jobs" := do
+  let result ← runSpider do
+    let config : WorkerPoolConfig := { workerCount := 1 }
+    let (cmdEvt, fireCmd) ← newTriggerEvent (t := Spider) (a := PoolCommand Nat Nat)
+
+    -- Create chainable processor that spawns follow-ups for job 1
+    let processor : ChainableProcessor Nat Nat Nat := {
+      process := fun n => do
+        if n == 1 then
+          -- Job 1 spawns jobs 10 and 11
+          pure { result := n * 10, followUps := #[(10, 100, 0), (11, 110, 0)] }
+        else
+          -- Other jobs don't spawn follow-ups
+          pure { result := n * 10 }
+    }
+
+    let (pool, handle) ← WorkerPool.fromCommandsChainable config processor cmdEvt
+
+    let completedRef ← SpiderM.liftIO <| IO.mkRef ([] : List (Nat × Nat))
+    let _ ← pool.completed.subscribe fun (id, _, res) =>
+      completedRef.modify (· ++ [(id, res)])
+
+    -- Submit job 1 (which will spawn 10 and 11)
+    SpiderM.liftIO <| fireCmd (.submit 1 1 0)
+
+    -- Wait for all 3 jobs to complete
+    let _ ← SpiderM.liftIO <| waitUntil (do
+      let completed ← completedRef.get
+      return completed.length >= 3) 500
+
+    SpiderM.liftIO handle.shutdown
+    SpiderM.liftIO completedRef.get
+
+  -- Should have completions for jobs 1, 10, and 11
+  shouldBe result.length 3
+  -- Job 1 should have result 10 (1 * 10)
+  shouldSatisfy (result.any fun (id, res) => id == 1 && res == 10) "job 1 completed with result 10"
+  -- Follow-up jobs use their payload as input
+  shouldSatisfy (result.any fun (id, res) => id == 10 && res == 1000) "follow-up job 10 completed"
+  shouldSatisfy (result.any fun (id, res) => id == 11 && res == 1100) "follow-up job 11 completed"
+
+test "withRetryScheduling retries on error" := do
+  let attemptRef ← IO.mkRef (0 : Nat)
+  let result ← runSpider do
+    let config : WorkerPoolConfig := { workerCount := 1 }
+    let (cmdEvt, fireCmd) ← newTriggerEvent (t := Spider) (a := PoolCommand Nat Nat)
+
+    let (pool, handle) ← WorkerPool.fromCommandsWithShutdown config
+      (fun (n : Nat) => do
+        let attempt ← attemptRef.modifyGet fun a => (a + 1, a + 1)
+        if attempt < 3 then
+          throw (IO.userError s!"attempt {attempt} failed")
+        pure n)
+      cmdEvt
+
+    let retryConfig : RetryConfig := { maxRetries := 3, baseDelayMs := 10, maxDelayMs := 50 }
+
+    let retryScheduledRef ← SpiderM.liftIO <| IO.mkRef ([] : List (Nat × Nat))
+    let completedRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
+
+    let scheduler ← withRetryScheduling retryConfig
+      (fun _ => true)  -- Always retry
+      (fun id => id)   -- Resubmit same job
+      pool
+      fireCmd
+
+    let _ ← scheduler.retryScheduled.subscribe fun p =>
+      retryScheduledRef.modify (· ++ [p])
+    let _ ← pool.completed.subscribe fun (id, _, _) =>
+      completedRef.modify (· ++ [id])
+
+    -- Submit job
+    SpiderM.liftIO <| fireCmd (.submit 1 1 0)
+
+    -- Wait for completion
+    let _ ← SpiderM.liftIO <| waitUntil (do
+      let completed ← completedRef.get
+      return completed.length >= 1) 1000
+
+    SpiderM.liftIO handle.shutdown
+
+    let retries ← SpiderM.liftIO retryScheduledRef.get
+    let completed ← SpiderM.liftIO completedRef.get
+    pure (retries.length, completed.length)
+
+  let attempts ← attemptRef.get
+  -- Should have 3 attempts (2 failures + 1 success)
+  shouldBe attempts 3
+  -- Should have 2 retry schedules
+  shouldBe result.fst 2
+  -- Should have 1 completion
+  shouldBe result.snd 1
+
+test "withRetryScheduling exhausts retries" := do
+  let attemptRef ← IO.mkRef (0 : Nat)
+  let result ← runSpider do
+    let config : WorkerPoolConfig := { workerCount := 1 }
+    let (cmdEvt, fireCmd) ← newTriggerEvent (t := Spider) (a := PoolCommand Nat Nat)
+
+    let (pool, handle) ← WorkerPool.fromCommandsWithShutdown (result := Nat) config
+      (fun (_ : Nat) => do
+        attemptRef.modify (· + 1)
+        throw (IO.userError "always fails"))
+      cmdEvt
+
+    let retryConfig : RetryConfig := { maxRetries := 2, baseDelayMs := 5, maxDelayMs := 20 }
+
+    let exhaustedRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
+
+    let scheduler ← withRetryScheduling (result := Nat) retryConfig
+      (fun _ => true)
+      (fun id => id)
+      pool
+      fireCmd
+
+    let _ ← scheduler.exhausted.subscribe fun p =>
+      exhaustedRef.modify (· ++ [p.fst])
+
+    -- Submit job
+    SpiderM.liftIO <| fireCmd (.submit 1 1 0)
+
+    -- Wait for exhaustion
+    let _ ← SpiderM.liftIO <| waitUntil (do
+      let exhausted ← exhaustedRef.get
+      return exhausted.length >= 1) 1000
+
+    SpiderM.liftIO handle.shutdown
+    SpiderM.liftIO exhaustedRef.get
+
+  let attempts ← attemptRef.get
+  -- Should have 3 attempts (initial + 2 retries)
+  shouldBe attempts 3
+  -- Should have fired exhausted event
+  shouldBe result [1]
+
+test "withTwoTierCache uses fast cache" := do
+  let processedRef ← IO.mkRef ([] : List Nat)
+  let fastCacheRef ← IO.mkRef ({} : Std.HashMap Nat String)
+
+  let cacheConfig : CacheConfig Nat String String := {
+    tryFastCache := fun key => do
+      let cache ← fastCacheRef.get
+      return cache[key]?
+    trySlowCache := fun _ => pure none
+    promoteToFast := fun key value => fastCacheRef.modify (·.insert key value)
+    saveToCache := fun key _ cached => fastCacheRef.modify (·.insert key cached)
+    cachedToResult := fun cached => pure cached
+  }
+
+  let processor := withTwoTierCache cacheConfig
+    (fun job => job)  -- key = job
+    (fun job => do
+      processedRef.modify (· ++ [job])
+      pure s!"result-{job}")
+    (fun result => pure result)
+
+  -- First call should process
+  let r1 ← processor 42
+  shouldBe r1 "result-42"
+
+  -- Pre-populate cache for second call
+  fastCacheRef.modify (·.insert 99 "cached-99")
+
+  -- Second call should hit cache
+  let r2 ← processor 99
+  shouldBe r2 "cached-99"
+
+  -- Check what was processed
+  let processed ← processedRef.get
+  shouldBe processed [42]  -- Only 42 was processed, 99 was cached
+
+test "submitDelayed command delays job submission" := do
+  let result ← runSpider do
+    let config : WorkerPoolConfig := { workerCount := 1 }
+    let (cmdEvt, fireCmd) ← newTriggerEvent (t := Spider) (a := PoolCommand Nat Nat)
+
+    let (pool, handle) ← WorkerPool.fromCommandsWithShutdown config
+      (fun (n : Nat) => pure n)
+      cmdEvt
+
+    let completedRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
+    let _ ← pool.completed.subscribe fun (id, _, _) =>
+      completedRef.modify (· ++ [id])
+
+    -- Submit with delay
+    let startTime ← SpiderM.liftIO IO.monoMsNow
+    SpiderM.liftIO <| fireCmd (.submitDelayed 1 10 0 100)
+
+    -- Wait for completion
+    let _ ← SpiderM.liftIO <| waitUntil (do
+      let completed ← completedRef.get
+      return completed.length >= 1) 500
+
+    let endTime ← SpiderM.liftIO IO.monoMsNow
+
+    SpiderM.liftIO handle.shutdown
+
+    let elapsed := endTime - startTime
+    let completed ← SpiderM.liftIO completedRef.get
+    pure (elapsed, completed)
+
+  -- Should have completed after delay
+  shouldBe result.snd [1]
+  -- Elapsed time should be at least 100ms
+  shouldSatisfy (result.fst >= 90) "delay was at least 90ms"
+
 end ReactiveTests.AsyncTests
