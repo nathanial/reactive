@@ -55,7 +55,7 @@ test "Dynamic.updated fires on changes" := do
     let trigger := pair.2
     let dyn ← holdDyn 0 event
 
-    let changesRef ← liftM (m := IO) <| IO.mkRef ([] : List Nat)
+    let changesRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
     let _ ← dyn.updated.subscribe fun n =>
       changesRef.modify (· ++ [n])
 
@@ -63,7 +63,7 @@ test "Dynamic.updated fires on changes" := do
     trigger 2
     trigger 3
 
-    liftM (m := IO) changesRef.get
+    SpiderM.liftIO changesRef.get
 
   shouldBe result [1, 2, 3]
 

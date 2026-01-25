@@ -22,7 +22,7 @@
     let clickCount ← foldDyn (fun _ n => n + 1) 0 clickEvent
 
     -- Subscribe to changes
-    let _ ← liftM (m := IO) <| clickCount.updated.subscribe fun n =>
+    let _ ← SpiderM.liftIO <| clickCount.updated.subscribe fun n =>
       IO.println s!"Click count: {n}"
 
     pure ()

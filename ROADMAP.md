@@ -504,19 +504,25 @@ Added configurable error handling for subscriber callbacks that throw exceptions
 
 ---
 
-### [Priority: Low] Consistent liftM Usage Pattern
+### [DONE] Consistent liftM Usage Pattern
 
-**Current State:** Test code and examples use verbose `liftM (m := IO) <| ...` for lifting IO actions into SpiderM.
+All test code and examples now use the consistent `SpiderM.liftIO` pattern instead of the verbose `liftM (m := IO)` syntax.
 
-**Progress:**
+**Completed:**
 1. ✓ Added `SpiderM.liftIO` convenience function
-2. Remaining: Update existing tests to use `liftIO` instead of `liftM (m := IO)`
-3. Remaining: Document preferred lifting patterns
+2. ✓ Updated EventTests.lean to use `SpiderM.liftIO`
+3. ✓ Updated DynamicTests.lean to use `SpiderM.liftIO`
+4. ✓ Updated README.md examples to use `SpiderM.liftIO`
+5. ✓ Updated Reactive.lean documentation to use `SpiderM.liftIO`
 
-**Affected Files:**
-- `/Users/Shared/Projects/lean-workspace/data/reactive/ReactiveTests/*.lean` (update examples)
+**Preferred Pattern:**
+```lean
+-- Use this:
+SpiderM.liftIO <| someIOAction
 
-**Estimated Effort:** Small
+-- Instead of:
+liftM (m := IO) <| someIOAction
+```
 
 ---
 
