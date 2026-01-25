@@ -86,6 +86,9 @@ def hold [Timeline t] (initial : a) (event : Event t a) : IO (Behavior t a) := d
   let _ ← Reactive.Event.subscribe event fun a => valueRef.set a
   Pure.pure (Behavior.fromSample valueRef.get)
 
+/-- Alias for `hold`. Common name in other FRP libraries (reactive-banana, sodium). -/
+abbrev stepper := @hold
+
 /-- Create a behavior by folding over event occurrences.
     Each event value is combined with the current state using the function.
 

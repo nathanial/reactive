@@ -195,6 +195,111 @@ def switchM (dd : Dynamic Spider (Dynamic Spider a)) : SpiderM (Dynamic Spider a
 def switch' (dd : Dynamic Spider (Dynamic Spider a)) : SpiderM (Dynamic Spider a) :=
   switchM dd
 
+/-- Deduplicate a Dynamic's updates using a custom comparison function.
+    Only fires when `eq oldVal newVal` returns false.
+
+    Example:
+    ```
+    -- Only fire when the name field changes
+    let uniqByName ← Dynamic.uniqByM (fun a b => a.name == b.name) userDyn
+    ``` -/
+def uniqByM (eq : a → a → Bool) (d : Dynamic Spider a) : SpiderM (Dynamic Spider a) := ⟨fun env => do
+  let _ ← env.incrementDepth "Dynamic.uniqByM"
+  let initial ← d.sample
+  let currentRef ← IO.mkRef initial
+  let (result, updateResult) ← createDynamic env.timelineCtx initial
+  let unsub ← Reactive.Event.subscribe d.updated fun newVal => do
+    let current ← currentRef.get
+    if !eq current newVal then
+      currentRef.set newVal
+      updateResult newVal
+  env.currentScope.register unsub
+  env.decrementDepth
+  pure result⟩
+
+/-- Deduplicate using custom comparison (fluent style).
+    Enables: `dynamic.uniqBy' eqFn` -/
+def uniqBy' (d : Dynamic Spider a) (eq : a → a → Bool) : SpiderM (Dynamic Spider a) :=
+  uniqByM eq d
+
+/-- Fold over events but only update state when the function returns Some.
+    This is useful when not every event should update the state.
+
+    Example:
+    ```
+    -- Only count positive numbers
+    let positiveCount ← foldDynMaybeM
+      (fun n count => if n > 0 then some (count + 1) else none)
+      0 numberEvent
+    ``` -/
+def foldDynMaybeM (f : a → b → Option b) (initial : b) (event : Event Spider a)
+    : SpiderM (Dynamic Spider b) := ⟨fun env => do
+  let _ ← env.incrementDepth "Dynamic.foldDynMaybeM"
+  let currentRef ← IO.mkRef initial
+  let (result, updateResult) ← createDynamic env.timelineCtx initial
+  let unsub ← Reactive.Event.subscribe event fun a => do
+    let current ← currentRef.get
+    match f a current with
+    | some newVal =>
+      currentRef.set newVal
+      updateResult newVal
+    | none => pure ()
+  env.currentScope.register unsub
+  env.decrementDepth
+  pure result⟩
+
+/-- Fold with conditional updates (fluent style).
+    Enables: `event.foldDynMaybe' f initial` -/
+def foldDynMaybe' (event : Event Spider a) (f : a → b → Option b) (initial : b)
+    : SpiderM (Dynamic Spider b) :=
+  foldDynMaybeM f initial event
+
+/-! ### Debugging Combinators -/
+
+/-- Debug logging for Dynamic value changes. Prints each change with a label.
+    Useful for debugging reactive networks.
+
+    Example:
+    ```
+    let debuggedCounter ← Dynamic.traceM "counter" counterDyn
+    -- Prints: [counter] <value> for each change
+    ``` -/
+def traceM (label : String) (d : Dynamic Spider a) [ToString a] : SpiderM (Dynamic Spider a) := ⟨fun env => do
+  let _ ← env.incrementDepth "Dynamic.traceM"
+  let initial ← d.sample
+  IO.println s!"[{label}] initial: {initial}"
+  let unsub ← Reactive.Event.subscribe d.updated fun newVal =>
+    IO.println s!"[{label}] {newVal}"
+  env.currentScope.register unsub
+  env.decrementDepth
+  pure d⟩
+
+/-- Debug logging with custom formatter.
+
+    Example:
+    ```
+    let debugged ← Dynamic.traceWithM "user" (fun u => u.name) userDyn
+    ``` -/
+def traceWithM (label : String) (f : a → String) (d : Dynamic Spider a) : SpiderM (Dynamic Spider a) := ⟨fun env => do
+  let _ ← env.incrementDepth "Dynamic.traceWithM"
+  let initial ← d.sample
+  IO.println s!"[{label}] initial: {f initial}"
+  let unsub ← Reactive.Event.subscribe d.updated fun newVal =>
+    IO.println s!"[{label}] {f newVal}"
+  env.currentScope.register unsub
+  env.decrementDepth
+  pure d⟩
+
+/-- Trace Dynamic changes (fluent style).
+    Enables: `dynamic.trace' "label"` -/
+def trace' (d : Dynamic Spider a) (label : String) [ToString a] : SpiderM (Dynamic Spider a) :=
+  traceM label d
+
+/-- Trace with custom formatter (fluent style).
+    Enables: `dynamic.traceWith' "label" formatter` -/
+def traceWith' (d : Dynamic Spider a) (label : String) (f : a → String) : SpiderM (Dynamic Spider a) :=
+  traceWithM label f d
+
 end Dynamic
 
 end Reactive.Host

@@ -819,6 +819,44 @@ def window' (e : Event Spider a) (d : Chronos.Duration) : SpiderM (Event Spider 
 def fanEither' (e : Event Spider (Sum a b)) : SpiderM (Event Spider a × Event Spider b) :=
   fanEitherM e
 
+/-! ### Debugging Combinators -/
+
+/-- Debug logging for events. Prints each event occurrence with a label.
+    Useful for debugging reactive networks.
+
+    Example:
+    ```
+    let debuggedClicks ← Event.traceM "click" clickEvent
+    -- Prints: [click] <value> for each occurrence
+    ``` -/
+def traceM (label : String) (e : Event Spider a) [ToString a] : SpiderM (Event Spider a) := ⟨fun env => do
+  let unsub ← Reactive.Event.subscribe e fun x =>
+    IO.println s!"[{label}] {x}"
+  env.currentScope.register unsub
+  pure e⟩
+
+/-- Debug logging with custom formatter.
+
+    Example:
+    ```
+    let debugged ← Event.traceWithM "user" (fun u => u.name) userEvent
+    ``` -/
+def traceWithM (label : String) (f : a → String) (e : Event Spider a) : SpiderM (Event Spider a) := ⟨fun env => do
+  let unsub ← Reactive.Event.subscribe e fun x =>
+    IO.println s!"[{label}] {f x}"
+  env.currentScope.register unsub
+  pure e⟩
+
+/-- Trace event occurrences (fluent style).
+    Enables: `event.trace' "label"` -/
+def trace' (e : Event Spider a) (label : String) [ToString a] : SpiderM (Event Spider a) :=
+  traceM label e
+
+/-- Trace with custom formatter (fluent style).
+    Enables: `event.traceWith' "label" formatter` -/
+def traceWith' (e : Event Spider a) (label : String) (f : a → String) : SpiderM (Event Spider a) :=
+  traceWithM label f e
+
 end Event
 
 end Reactive.Host

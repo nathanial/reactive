@@ -532,22 +532,14 @@ Implemented. See "Type-Safe Timeline Separation" in Recently Completed section.
 
 ---
 
-### [Priority: Low] Replace IO.Ref with More Efficient Mutable State
+### [CLOSED - Won't Fix] Replace IO.Ref with More Efficient Mutable State
 
-**Current State:** Uses `IO.Ref` for all mutable state (subscriber lists, current values).
+**Decision:** Current `IO.Ref` performance is sufficient. Benchmarks show good results:
+- 100 IO.Ref ops: ~2000ns
+- 1000 subscribers x 100 fires: 5ms
+- 1000-deep chain x 100 fires: 45000ns
 
-**Proposed Change:** Consider using `ST.Ref` within an `ST` region for better performance, or `IO.Mutex` for thread-safety if concurrent access is needed.
-
-**Benefits:**
-- Potential performance improvements
-- Clearer concurrency story
-
-**Affected Files:**
-- `/Users/Shared/Projects/lean-workspace/data/reactive/Reactive/Core/Event.lean`
-- `/Users/Shared/Projects/lean-workspace/data/reactive/Reactive/Core/Dynamic.lean`
-- `/Users/Shared/Projects/lean-workspace/data/reactive/Reactive/Host/Spider.lean`
-
-**Estimated Effort:** Medium
+The architectural changes required to switch to `ST.Ref` would be significant (different monad structure) and the performance gains are uncertain given Lean's already-optimized `IO.Ref` implementation.
 
 ---
 

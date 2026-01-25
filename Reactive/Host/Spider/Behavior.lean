@@ -25,6 +25,9 @@ def holdM (initial : a) (event : Event Spider a) : SpiderM (Behavior Spider a) :
   env.currentScope.register unsub
   pure (Behavior.fromSample valueRef.get)⟩
 
+/-- Alias for `holdM`. Common name in other FRP libraries (reactive-banana, sodium). -/
+abbrev stepperM := @holdM
+
 /-- Create a behavior by folding over event occurrences.
     Registers subscription with current scope for automatic cleanup. -/
 def foldBM (f : a → b → b) (initial : b) (event : Event Spider a) : SpiderM (Behavior Spider b) := ⟨fun env => do
