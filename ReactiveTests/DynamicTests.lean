@@ -350,5 +350,155 @@ test "Multiple Dynamic.mapM with subscriptions" := do
     [false, true, false]    -- derived2: all 3 updates fire
   )
 
+-- Tests for Option-handling Dynamic combinators
+
+-- Helper structure for bindOptionM tests
+structure TestItem where
+  id : Nat
+  valueDyn : Dynamic Spider Nat
+
+test "Dynamic.bindOptionM with initial none shows default" := do
+  let result ← runSpider do
+    let (event, _trigger) ← newTriggerEvent (t := Spider) (a := Option TestItem)
+    let optDyn ← holdDyn none event
+    let bound ← Dynamic.bindOptionM optDyn (·.valueDyn) 999
+    bound.sample
+  shouldBe result 999
+
+test "Dynamic.bindOptionM with initial some tracks inner dynamic" := do
+  let result ← runSpider do
+    -- Create an inner dynamic with value 10
+    let (innerEvent, _) ← newTriggerEvent (t := Spider) (a := Nat)
+    let innerDyn ← holdDyn 10 innerEvent
+    let item : TestItem := { id := 1, valueDyn := innerDyn }
+
+    let (event, _trigger) ← newTriggerEvent (t := Spider) (a := Option TestItem)
+    let optDyn ← holdDyn (some item) event
+    let bound ← Dynamic.bindOptionM optDyn (·.valueDyn) 999
+    bound.sample
+  shouldBe result 10
+
+test "Dynamic.bindOptionM switching from some to none shows default" := do
+  let result ← runSpider do
+    -- Create an inner dynamic with value 10
+    let (innerEvent, _) ← newTriggerEvent (t := Spider) (a := Nat)
+    let innerDyn ← holdDyn 10 innerEvent
+    let item : TestItem := { id := 1, valueDyn := innerDyn }
+
+    let (event, trigger) ← newTriggerEvent (t := Spider) (a := Option TestItem)
+    let optDyn ← holdDyn (some item) event
+    let bound ← Dynamic.bindOptionM optDyn (·.valueDyn) 999
+
+    let v0 ← bound.sample
+    trigger none
+    let v1 ← bound.sample
+    pure (v0, v1)
+  shouldBe result (10, 999)
+
+test "Dynamic.bindOptionM switching from none to some tracks new inner" := do
+  let result ← runSpider do
+    -- Create an inner dynamic with value 42
+    let (innerEvent, _) ← newTriggerEvent (t := Spider) (a := Nat)
+    let innerDyn ← holdDyn 42 innerEvent
+    let item : TestItem := { id := 1, valueDyn := innerDyn }
+
+    let (event, trigger) ← newTriggerEvent (t := Spider) (a := Option TestItem)
+    let optDyn ← holdDyn none event
+    let bound ← Dynamic.bindOptionM optDyn (·.valueDyn) 999
+
+    let v0 ← bound.sample
+    trigger (some item)
+    let v1 ← bound.sample
+    pure (v0, v1)
+  shouldBe result (999, 42)
+
+test "Dynamic.bindOptionM switches inner subscription between some values" := do
+  let result ← runSpider do
+    -- Create two inner dynamics with different values
+    let (innerEvent1, _) ← newTriggerEvent (t := Spider) (a := Nat)
+    let innerDyn1 ← holdDyn 100 innerEvent1
+    let item1 : TestItem := { id := 1, valueDyn := innerDyn1 }
+
+    let (innerEvent2, _) ← newTriggerEvent (t := Spider) (a := Nat)
+    let innerDyn2 ← holdDyn 200 innerEvent2
+    let item2 : TestItem := { id := 2, valueDyn := innerDyn2 }
+
+    let (event, trigger) ← newTriggerEvent (t := Spider) (a := Option TestItem)
+    let optDyn ← holdDyn (some item1) event
+    let bound ← Dynamic.bindOptionM optDyn (·.valueDyn) 0
+
+    let v0 ← bound.sample  -- item1's value = 100
+    trigger (some item2)
+    let v1 ← bound.sample  -- item2's value = 200
+    trigger (some item1)
+    let v2 ← bound.sample  -- back to item1's value = 100
+    pure (v0, v1, v2)
+  shouldBe result (100, 200, 100)
+
+test "Dynamic.bindOptionM tracks inner dynamic updates" := do
+  let result ← runSpider do
+    -- Create an inner dynamic that we can update
+    let (innerEvent, innerTrigger) ← newTriggerEvent (t := Spider) (a := Nat)
+    let innerDyn ← holdDyn 10 innerEvent
+    let item : TestItem := { id := 1, valueDyn := innerDyn }
+
+    let (optEvent, triggerOpt) ← newTriggerEvent (t := Spider) (a := Option TestItem)
+    let optDyn ← holdDyn none optEvent
+
+    let bound ← Dynamic.bindOptionM optDyn (·.valueDyn) 0
+
+    -- Initially none → default
+    let v0 ← bound.sample
+
+    -- Switch to some item
+    triggerOpt (some item)
+    let v1 ← bound.sample
+
+    -- Update the inner dynamic
+    innerTrigger 20
+    let v2 ← bound.sample
+
+    pure (v0, v1, v2)
+  shouldBe result (0, 10, 20)
+
+test "Dynamic.switchOptionM with none shows default" := do
+  let result ← runSpider do
+    let (event, _trigger) ← newTriggerEvent (t := Spider) (a := Option (Dynamic Spider Nat))
+    let optDynOfDyn ← holdDyn none event
+    let switched ← Dynamic.switchOptionM optDynOfDyn 42
+    switched.sample
+  shouldBe result 42
+
+test "Dynamic.switchOptionM with some tracks inner dynamic" := do
+  let result ← runSpider do
+    let (innerEvent, innerTrigger) ← newTriggerEvent (t := Spider) (a := Nat)
+    let innerDyn ← holdDyn 100 innerEvent
+    let (outerEvent, _outerTrigger) ← newTriggerEvent (t := Spider) (a := Option (Dynamic Spider Nat))
+    let optDynOfDyn ← holdDyn (some innerDyn) outerEvent
+    let switched ← Dynamic.switchOptionM optDynOfDyn 0
+
+    let v0 ← switched.sample
+    innerTrigger 200
+    let v1 ← switched.sample
+    pure (v0, v1)
+  shouldBe result (100, 200)
+
+test "Dynamic.bindOption' fluent style works correctly" := do
+  let result ← runSpider do
+    -- Create an inner dynamic
+    let (innerEvent, _) ← newTriggerEvent (t := Spider) (a := Nat)
+    let innerDyn ← holdDyn 105 innerEvent
+    let item : TestItem := { id := 1, valueDyn := innerDyn }
+
+    let (event, trigger) ← newTriggerEvent (t := Spider) (a := Option TestItem)
+    let optDyn ← holdDyn none event
+    let bound ← Dynamic.bindOption' optDyn 999 (·.valueDyn)
+
+    let v0 ← bound.sample
+    trigger (some item)
+    let v1 ← bound.sample
+    pure (v0, v1)
+  shouldBe result (999, 105)
+
 
 end ReactiveTests.DynamicTests

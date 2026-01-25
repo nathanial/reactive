@@ -195,6 +195,86 @@ def switchM (dd : Dynamic Spider (Dynamic Spider a)) : SpiderM (Dynamic Spider a
 def switch' (dd : Dynamic Spider (Dynamic Spider a)) : SpiderM (Dynamic Spider a) :=
   switchM dd
 
+/-- Bind/flatMap for Dyn (Option a).
+    When the outer dynamic is `none`, the result holds the default value.
+    When the outer dynamic is `some v`, the result tracks the dynamic produced by `f v`.
+
+    This is the general form that avoids intermediate `Dyn (Option (Dyn a))`.
+
+    Example:
+    ```
+    -- Switch to streaming content when request is active, else show placeholder
+    let display ← Dynamic.bindOptionM requestDyn (·.contentDyn) "Loading..."
+    ``` -/
+def bindOptionM (d : Dynamic Spider (Option a)) (f : a → Dynamic Spider b) (default : b)
+    : SpiderM (Dynamic Spider b) := ⟨fun env => do
+  let _ ← env.incrementDepth "Dynamic.bindOptionM"
+  let initialOpt ← d.sample
+  let initialValue ← match initialOpt with
+    | some v => (f v).sample
+    | none => pure default
+  let (result, updateResult) ← createDynamic env.timelineCtx initialValue
+  let currentUnsubRef ← IO.mkRef (pure () : IO Unit)
+
+  let subscribeToInner := fun (inner : Dynamic Spider b) => do
+    let oldUnsub ← currentUnsubRef.get
+    oldUnsub
+    let unsub ← Reactive.Event.subscribe inner.updated fun newValue => updateResult newValue
+    currentUnsubRef.set unsub
+    let currentValue ← inner.sample
+    updateResult currentValue
+
+  -- Initial subscription if some
+  match initialOpt with
+  | some v =>
+    let inner := f v
+    let unsubInner ← Reactive.Event.subscribe inner.updated fun newValue => updateResult newValue
+    currentUnsubRef.set unsubInner
+  | none => pure ()
+
+  -- Outer subscription
+  let unsubOuter ← Reactive.Event.subscribe d.updated fun opt => do
+    match opt with
+    | some v => subscribeToInner (f v)
+    | none =>
+      let oldUnsub ← currentUnsubRef.get
+      oldUnsub
+      currentUnsubRef.set (pure ())
+      updateResult default
+
+  env.currentScope.register unsubOuter
+  env.currentScope.register do
+    let unsub ← currentUnsubRef.get
+    unsub
+
+  env.decrementDepth
+  pure result⟩
+
+/-- Switch/join a Dynamic of Optional Dynamics.
+    When the outer is `none`, the result holds the default value.
+    When the outer is `some inner`, the result tracks the inner dynamic.
+
+    Example:
+    ```
+    -- Track selected item's details, or show placeholder
+    let details ← Dynamic.switchOptionM selectedItemDyn defaultDetails
+    ``` -/
+def switchOptionM (dd : Dynamic Spider (Option (Dynamic Spider a))) (default : a)
+    : SpiderM (Dynamic Spider a) :=
+  bindOptionM dd id default
+
+/-- Bind/flatMap for optional dynamics (fluent style).
+    Enables: `optDyn.bindOption' default f` -/
+def bindOption' (d : Dynamic Spider (Option a)) (default : b) (f : a → Dynamic Spider b)
+    : SpiderM (Dynamic Spider b) :=
+  bindOptionM d f default
+
+/-- Switch optional nested dynamic (fluent style).
+    Enables: `optDynOfDyn.switchOption' default` -/
+def switchOption' (dd : Dynamic Spider (Option (Dynamic Spider a))) (default : a)
+    : SpiderM (Dynamic Spider a) :=
+  switchOptionM dd default
+
 /-- Deduplicate a Dynamic's updates using a custom comparison function.
     Only fires when `eq oldVal newVal` returns false.
 

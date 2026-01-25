@@ -153,9 +153,11 @@ All have `'` suffix: `map'`, `filter'`, `mapMaybe'`, `merge'`, `tag'`, `attach'`
 | `Dynamic.changesM d` | Event of `(old, new)` pairs |
 | `Dynamic.holdUniqDynM d` | Deduplicate updates |
 | `Dynamic.switchM dd` | Flatten `Dyn (Dyn a)` → `Dyn a` |
+| `Dynamic.bindOptionM d f default` | Bind/flatMap for `Dyn (Option a)` |
+| `Dynamic.switchOptionM dd default` | Flatten `Dyn (Option (Dyn a))` with default |
 
 #### Fluent Variants
-`map'`, `mapUniq'`, `zipWith'`, `zip'`, `zipWith3'`, `ap'`, `switch'`
+`map'`, `mapUniq'`, `zipWith'`, `zip'`, `zipWith3'`, `ap'`, `switch'`, `bindOption'`, `switchOption'`
 
 ---
 
