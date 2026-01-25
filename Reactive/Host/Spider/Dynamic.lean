@@ -300,6 +300,60 @@ def trace' (d : Dynamic Spider a) (label : String) [ToString a] : SpiderM (Dynam
 def traceWith' (d : Dynamic Spider a) (label : String) (f : a → String) : SpiderM (Dynamic Spider a) :=
   traceWithM label f d
 
+/-! ### Collection Combinators -/
+
+/-- Convert a List of Dynamics into a Dynamic of List.
+    The resulting dynamic updates whenever any input dynamic changes.
+
+    Essential for working with dynamic collections where each element is reactive.
+
+    Example:
+    ```
+    let dynamics : List (Dynamic Spider Nat) := [counterA, counterB, counterC]
+    let allCounters ← Dynamic.sequenceM dynamics
+    -- allCounters : Dynamic Spider (List Nat)
+    -- Updates whenever any counter changes
+    ``` -/
+def sequenceM (dynamics : List (Dynamic Spider a)) : SpiderM (Dynamic Spider (List a)) := ⟨fun env => do
+  let _ ← env.incrementDepth "Dynamic.sequenceM"
+  -- Sample all initial values
+  let initial ← dynamics.mapM (·.sample)
+  let (result, updateResult) ← createDynamic env.timelineCtx initial
+
+  -- Helper to resample all dynamics and update the result
+  let resampleAll : IO Unit := do
+    let values ← dynamics.mapM (·.sample)
+    updateResult values
+
+  -- Subscribe to each dynamic's updates
+  for d in dynamics do
+    let unsub ← Reactive.Event.subscribe d.updated fun _ => resampleAll
+    env.currentScope.register unsub
+
+  env.decrementDepth
+  pure result⟩
+
+/-- Convert an Array of Dynamics into a Dynamic of Array.
+    The resulting dynamic updates whenever any input dynamic changes. -/
+def sequenceArrayM (dynamics : Array (Dynamic Spider a)) : SpiderM (Dynamic Spider (Array a)) := ⟨fun env => do
+  let _ ← env.incrementDepth "Dynamic.sequenceArrayM"
+  -- Sample all initial values
+  let initial ← dynamics.mapM (·.sample)
+  let (result, updateResult) ← createDynamic env.timelineCtx initial
+
+  -- Helper to resample all dynamics and update the result
+  let resampleAll : IO Unit := do
+    let values ← dynamics.mapM (·.sample)
+    updateResult values
+
+  -- Subscribe to each dynamic's updates
+  for d in dynamics do
+    let unsub ← Reactive.Event.subscribe d.updated fun _ => resampleAll
+    env.currentScope.register unsub
+
+  env.decrementDepth
+  pure result⟩
+
 end Dynamic
 
 end Reactive.Host
