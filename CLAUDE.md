@@ -78,12 +78,14 @@ All combinators auto-allocate NodeIds and register subscriptions with current sc
 | `Event.voidM e` | `Evt a → SpiderM (Evt Unit)` | Discard values |
 | `Event.mapConstM b e` | `β → Evt α → SpiderM (Evt β)` | Map to constant |
 
-#### Merging
+#### Merging (Reflex-style Left-Bias)
 | Combinator | Description |
 |------------|-------------|
-| `Event.mergeM e1 e2` | Merge two events (both fire if simultaneous) |
-| `Event.mergeListM es` | Merge list, batching simultaneous fires |
-| `Event.leftmostM es` | Take leftmost of simultaneous fires |
+| `Event.mergeM e1 e2` | Merge two events with left-bias (only left fires if simultaneous) |
+| `Event.mergeAllM e1 e2` | Merge two events, firing all (both fire if simultaneous) |
+| `Event.mergeListM es` | Merge list, batching simultaneous fires into a list |
+| `Event.leftmostM es` | Take first firing event (first-only if simultaneous) |
+| `Event.mergeAllListM es` | Merge list, all fire if simultaneous |
 
 #### Behavior Interaction
 | Combinator | Description |
@@ -136,7 +138,7 @@ All combinators auto-allocate NodeIds and register subscriptions with current sc
 | `Event.switchDynM de` | Switch to event inside Dynamic |
 
 #### Fluent Variants (event-first argument order)
-All have `'` suffix: `map'`, `filter'`, `mapMaybe'`, `merge'`, `tag'`, `attach'`, `attachWith'`, `gate'`, `take'`, `drop'`, `scan'`, `delayFrame'`, `delay'`, `debounce'`, `throttle'`, `window'`, `once'`, `distinct'`, `buffer'`, `zipE'`, `difference'`, `fanEither'`, `splitE'`, `withPrevious'`
+All have `'` suffix: `map'`, `filter'`, `mapMaybe'`, `merge'`, `mergeAll'`, `tag'`, `attach'`, `attachWith'`, `gate'`, `take'`, `drop'`, `scan'`, `delayFrame'`, `delay'`, `debounce'`, `throttle'`, `window'`, `once'`, `distinct'`, `buffer'`, `zipE'`, `difference'`, `fanEither'`, `splitE'`, `withPrevious'`
 
 ---
 

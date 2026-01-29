@@ -1266,5 +1266,124 @@ test "Event.difference with pure IO" := do
     SpiderM.liftIO receivedRef.get
   shouldBe result ["a", "b"]
 
+-- Left-bias / First-only Merge Tests
+
+test "Event.mergeM left-biases simultaneous events" := do
+  let result ← runSpider do
+    let (trigger, fire) ← newTriggerEvent (t := Spider) (a := Nat)
+    -- Create two derived events from same source (diamond pattern)
+    let e1 ← Event.mapM (· * 2) trigger
+    let e2 ← Event.mapM (· * 3) trigger
+    let merged ← Event.mergeM e1 e2  -- left-bias: only e1 fires
+
+    let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
+    let _ ← merged.subscribe fun n =>
+      receivedRef.modify (· ++ [n])
+
+    fire 5  -- e1 produces 10, e2 produces 15, but only 10 delivered
+    SpiderM.liftIO receivedRef.get
+  shouldBe result [10]
+
+test "Event.mergeAllM fires all simultaneous events" := do
+  let result ← runSpider do
+    let (trigger, fire) ← newTriggerEvent (t := Spider) (a := Nat)
+    -- Create two derived events from same source (diamond pattern)
+    let e1 ← Event.mapM (· * 2) trigger
+    let e2 ← Event.mapM (· * 3) trigger
+    let merged ← Event.mergeAllM e1 e2  -- all-fire: both fire
+
+    let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
+    let _ ← merged.subscribe fun n =>
+      receivedRef.modify (· ++ [n])
+
+    fire 5  -- e1 produces 10, e2 produces 15, both delivered
+    SpiderM.liftIO receivedRef.get
+  shouldBe result [10, 15]
+
+test "Event.leftmostM takes only first when simultaneous" := do
+  let result ← runSpider do
+    let (trigger, fire) ← newTriggerEvent (t := Spider) (a := Nat)
+    -- Create three derived events from same source
+    let e1 ← Event.mapM (· + 1) trigger
+    let e2 ← Event.mapM (· + 2) trigger
+    let e3 ← Event.mapM (· + 3) trigger
+    let first ← Event.leftmostM [e1, e2, e3]  -- first-only: only e1 fires
+
+    let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
+    let _ ← first.subscribe fun n =>
+      receivedRef.modify (· ++ [n])
+
+    fire 10  -- e1=11, e2=12, e3=13, but only 11 delivered
+    SpiderM.liftIO receivedRef.get
+  shouldBe result [11]
+
+test "Event.mergeAllListM fires all values" := do
+  let result ← runSpider do
+    let (trigger, fire) ← newTriggerEvent (t := Spider) (a := Nat)
+    -- Create three derived events from same source
+    let e1 ← Event.mapM (· + 1) trigger
+    let e2 ← Event.mapM (· + 2) trigger
+    let e3 ← Event.mapM (· + 3) trigger
+    let all ← Event.mergeAllListM [e1, e2, e3]  -- all-fire: all fire
+
+    let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
+    let _ ← all.subscribe fun n =>
+      receivedRef.modify (· ++ [n])
+
+    fire 10  -- e1=11, e2=12, e3=13, all delivered (order may vary)
+    let vals ← SpiderM.liftIO receivedRef.get
+    pure ((vals.toArray.qsort (· < ·)).toList)
+  -- All three values should be present (sorted for order-independence)
+  shouldBe result [11, 12, 13]
+
+test "Event.mergeM sequential frames reset properly" := do
+  let result ← runSpider do
+    let (trigger, fire) ← newTriggerEvent (t := Spider) (a := Nat)
+    let e1 ← Event.mapM (· * 2) trigger
+    let e2 ← Event.mapM (· * 3) trigger
+    let merged ← Event.mergeM e1 e2
+
+    let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
+    let _ ← merged.subscribe fun n =>
+      receivedRef.modify (· ++ [n])
+
+    -- Each fire is a separate frame, so each can fire independently
+    fire 1  -- 2 (left-bias suppresses 3)
+    fire 2  -- 4 (left-bias suppresses 6)
+    fire 3  -- 6 (left-bias suppresses 9)
+    SpiderM.liftIO receivedRef.get
+  shouldBe result [2, 4, 6]
+
+test "Event.mergeM with non-simultaneous events fires both" := do
+  let result ← runSpider do
+    let (e1, fire1) ← newTriggerEvent (t := Spider) (a := Nat)
+    let (e2, fire2) ← newTriggerEvent (t := Spider) (a := Nat)
+    let merged ← Event.mergeM e1 e2
+
+    let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
+    let _ ← merged.subscribe fun n =>
+      receivedRef.modify (· ++ [n])
+
+    -- Fire separately (different frames)
+    fire1 10
+    fire2 20
+    fire1 30
+    SpiderM.liftIO receivedRef.get
+  shouldBe result [10, 20, 30]
+
+test "Event.mergeAll' fluent variant fires all" := do
+  let result ← runSpider do
+    let (trigger, fire) ← newTriggerEvent (t := Spider) (a := Nat)
+    let e1 ← Event.mapM (· + 100) trigger
+    let e2 ← Event.mapM (· + 200) trigger
+    let merged ← Event.mergeAll' e1 e2
+
+    let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
+    let _ ← merged.subscribe fun n =>
+      receivedRef.modify (· ++ [n])
+
+    fire 5
+    SpiderM.liftIO receivedRef.get
+  shouldBe result [105, 205]
 
 end ReactiveTests.EventTests

@@ -105,7 +105,7 @@ test "fan-in with accumulation" := do
 
 -- Diamond pattern tests
 
-test "diamond pattern: split and rejoin" := do
+test "diamond pattern: split and rejoin with first-only" := do
   let result ← runSpider do
     let (source, trigger) ← newTriggerEvent (t := Spider) (a := Nat)
 
@@ -113,7 +113,7 @@ test "diamond pattern: split and rejoin" := do
     let branch1 ← Event.mapM (· + 10) source
     let branch2 ← Event.mapM (· + 20) source
 
-    -- Rejoin
+    -- Rejoin (leftmostM uses first-only semantics)
     let joined ← Event.leftmostM [branch1, branch2]
 
     let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
@@ -122,7 +122,27 @@ test "diamond pattern: split and rejoin" := do
 
     trigger 5
     SpiderM.liftIO receivedRef.get
-  -- Both branches fire, order depends on height ordering
+  -- Both branches fire simultaneously, but leftmostM takes only the first
+  shouldBe result [15]
+
+test "diamond pattern: split and rejoin with mergeAllListM" := do
+  let result ← runSpider do
+    let (source, trigger) ← newTriggerEvent (t := Spider) (a := Nat)
+
+    -- Split
+    let branch1 ← Event.mapM (· + 10) source
+    let branch2 ← Event.mapM (· + 20) source
+
+    -- Rejoin (mergeAllListM fires all)
+    let joined ← Event.mergeAllListM [branch1, branch2]
+
+    let receivedRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
+    let _ ← joined.subscribe fun n =>
+      receivedRef.modify (· ++ [n])
+
+    trigger 5
+    SpiderM.liftIO receivedRef.get
+  -- Both branches fire, mergeAllListM delivers all values
   shouldBe result [15, 25]
 
 test "diamond pattern with mergeList batching" := do

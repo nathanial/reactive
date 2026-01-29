@@ -83,9 +83,51 @@ def voidM (e : Event Spider a) : SpiderM (Event Spider Unit) :=
 def mapConstM (b : β) (e : Event Spider α) : SpiderM (Event Spider β) :=
   mapM (fun _ => b) e
 
-/-- Merge two Events, auto-allocating NodeId and registering with scope. -/
+/-- Merge two Events with left-bias (Reflex-style semantics).
+    When both events fire simultaneously in the same frame, only the left event's
+    value is delivered. For all-fire behavior, use `mergeAllM` instead. -/
 def mergeM (e1 : Event Spider a) (e2 : Event Spider a) : SpiderM (Event Spider a) := ⟨fun env => do
   let _ ← env.incrementDepth "Event.mergeM"
+  let nodeId ← env.timelineCtx.freshNodeId
+  let height := Height.inc (max e1.height e2.height)
+  let derived ← Event.newNodeWithId nodeId height
+
+  -- Track whether we've already fired in this frame (for left-bias)
+  let firedThisFrameRef ← IO.mkRef false
+  let resetScheduledRef ← IO.mkRef false
+
+  let tryFire (value : a) : IO Unit := do
+    let alreadyFired ← firedThisFrameRef.get
+    if !alreadyFired then
+      firedThisFrameRef.set true
+      -- Schedule reset at derived height for next frame
+      let needsReset ← resetScheduledRef.get
+      if !needsReset then
+        resetScheduledRef.set true
+        let resetAction : IO Unit := do
+          resetScheduledRef.set false
+          firedThisFrameRef.set false
+        match ← getPropagationContext with
+        | some queue =>
+          if ← queue.isInFrame then
+            queue.insert ⟨derived.height, nodeId, resetAction⟩
+          else resetAction
+        | none => resetAction
+      derived.fire value
+
+  -- e1 (left) fires first due to subscription order
+  let unsub1 ← Reactive.Event.subscribe e1 tryFire
+  let unsub2 ← Reactive.Event.subscribe e2 tryFire
+  env.currentScope.register unsub1
+  env.currentScope.register unsub2
+  env.decrementDepth
+  pure derived⟩
+
+/-- Merge two Events, firing all values (both events fire if simultaneous).
+    This preserves the pre-Reflex behavior where simultaneous events both fire.
+    For left-bias semantics, use `mergeM` instead. -/
+def mergeAllM (e1 : Event Spider a) (e2 : Event Spider a) : SpiderM (Event Spider a) := ⟨fun env => do
+  let _ ← env.incrementDepth "Event.mergeAllM"
   let nodeId ← env.timelineCtx.freshNodeId
   let height := Height.inc (max e1.height e2.height)
   let derived ← Event.newNodeWithId nodeId height
@@ -183,9 +225,49 @@ def mergeListM (events : List (Event Spider a)) : SpiderM (Event Spider (List a)
   env.decrementDepth
   pure derived⟩
 
-/-- Take the leftmost firing Event from a list, auto-allocating NodeId and registering with scope. -/
+/-- Take the leftmost firing Event from a list (Reflex-style first-only semantics).
+    When multiple events in the list fire simultaneously, only the first one's value
+    is delivered. For all-fire behavior, use `mergeAllListM` instead. -/
 def leftmostM (events : List (Event Spider a)) : SpiderM (Event Spider a) := ⟨fun env => do
   let _ ← env.incrementDepth "Event.leftmostM"
+  let nodeId ← env.timelineCtx.freshNodeId
+  let maxHeight := events.foldl (fun h e => max h e.height) ⟨0⟩
+  let derived ← Event.newNodeWithId nodeId (maxHeight.inc)
+
+  -- Track whether we've already fired in this frame (for first-only)
+  let firedThisFrameRef ← IO.mkRef false
+  let resetScheduledRef ← IO.mkRef false
+
+  let tryFire (value : a) : IO Unit := do
+    let alreadyFired ← firedThisFrameRef.get
+    if !alreadyFired then
+      firedThisFrameRef.set true
+      -- Schedule reset at derived height for next frame
+      let needsReset ← resetScheduledRef.get
+      if !needsReset then
+        resetScheduledRef.set true
+        let resetAction : IO Unit := do
+          resetScheduledRef.set false
+          firedThisFrameRef.set false
+        match ← getPropagationContext with
+        | some queue =>
+          if ← queue.isInFrame then
+            queue.insert ⟨derived.height, nodeId, resetAction⟩
+          else resetAction
+        | none => resetAction
+      derived.fire value
+
+  for e in events do
+    let unsub ← Reactive.Event.subscribe e tryFire
+    env.currentScope.register unsub
+  env.decrementDepth
+  pure derived⟩
+
+/-- Merge all events from a list into one (all events fire if simultaneous).
+    This preserves the pre-Reflex behavior where all simultaneous events fire.
+    For first-only semantics, use `leftmostM` instead. -/
+def mergeAllListM (events : List (Event Spider a)) : SpiderM (Event Spider a) := ⟨fun env => do
+  let _ ← env.incrementDepth "Event.mergeAllListM"
   let nodeId ← env.timelineCtx.freshNodeId
   let maxHeight := events.foldl (fun h e => max h e.height) ⟨0⟩
   let derived ← Event.newNodeWithId nodeId (maxHeight.inc)
@@ -741,10 +823,15 @@ def mapMaybe' (e : Event Spider a) (f : a → Option b) : SpiderM (Event Spider 
 def mapConst' (e : Event Spider α) (b : β) : SpiderM (Event Spider β) :=
   mapConstM b e
 
-/-- Merge with another Event (fluent style).
+/-- Merge with another Event with left-bias (fluent style).
     Enables: `event1.merge' event2` -/
 def merge' (e1 : Event Spider a) (e2 : Event Spider a) : SpiderM (Event Spider a) :=
   mergeM e1 e2
+
+/-- Merge with another Event, firing all values (fluent style).
+    Enables: `event1.mergeAll' event2` -/
+def mergeAll' (e1 : Event Spider a) (e2 : Event Spider a) : SpiderM (Event Spider a) :=
+  mergeAllM e1 e2
 
 /-- Tag with a Behavior's value (fluent style).
     Enables: `event.tag' behavior` -/

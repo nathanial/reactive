@@ -406,19 +406,46 @@ def mapMaybe [Timeline t] (ctx : TimelineCtx t) (f : a → Option b) (source : E
     | some b => fire b
     | none => pure ()
 
-/-- Merge two events into one (with explicit NodeId).
+/-- Merge two events into one with left-bias (with explicit NodeId).
     When either fires, the merged event fires with that value.
-    When both fire simultaneously (same frame), both values are delivered. -/
+    When both fire simultaneously (same frame), only the left event's value
+    is delivered (Reflex-style semantics). For all-fire behavior, use `mergeAllWithId`. -/
 def mergeWithId [Timeline t] (e1 : Event t a) (e2 : Event t a) (derivedNodeId : NodeId) : IO (Event t a) := do
   let height := Height.inc (max e1.height e2.height)
   let derived ← Event.newNodeWithId derivedNodeId height
-  let _ ← Reactive.Event.subscribe e1 derived.fire
-  let _ ← Reactive.Event.subscribe e2 derived.fire
+
+  -- Track whether we've already fired in this frame (for left-bias)
+  let firedThisFrameRef ← IO.mkRef false
+  let resetScheduledRef ← IO.mkRef false
+
+  let tryFire (value : a) : IO Unit := do
+    let alreadyFired ← firedThisFrameRef.get
+    if !alreadyFired then
+      firedThisFrameRef.set true
+      -- Schedule reset at derived height for next frame
+      let needsReset ← resetScheduledRef.get
+      if !needsReset then
+        resetScheduledRef.set true
+        let resetAction : IO Unit := do
+          resetScheduledRef.set false
+          firedThisFrameRef.set false
+        match ← getPropagationContext with
+        | some queue =>
+          if ← queue.isInFrame then
+            queue.insert ⟨derived.height, derivedNodeId, resetAction⟩
+          else resetAction
+        | none => resetAction
+      derived.fire value
+
+  -- e1 (left) fires first due to subscription order
+  let _ ← Reactive.Event.subscribe e1 tryFire
+  let _ ← Reactive.Event.subscribe e2 tryFire
   pure derived
 
-/-- Merge two events into one.
+/-- Merge two events into one with left-bias.
     When either fires, the merged event fires with that value.
-    When both fire simultaneously (same frame), both values are delivered.
+    When both fire simultaneously (same frame), only the left event's value
+    is delivered (Reflex-style semantics). For all-fire behavior, use `mergeAll`.
 
     Example:
     ```
@@ -429,6 +456,23 @@ def mergeWithId [Timeline t] (e1 : Event t a) (e2 : Event t a) (derivedNodeId : 
 def merge [Timeline t] (ctx : TimelineCtx t) (e1 : Event t a) (e2 : Event t a) : IO (Event t a) := do
   let nodeId ← ctx.freshNodeId
   mergeWithId e1 e2 nodeId
+
+/-- Merge two events into one, firing all values (with explicit NodeId).
+    When both fire simultaneously (same frame), both values are delivered.
+    This preserves the pre-Reflex behavior. For left-bias semantics, use `mergeWithId`. -/
+def mergeAllWithId [Timeline t] (e1 : Event t a) (e2 : Event t a) (derivedNodeId : NodeId) : IO (Event t a) := do
+  let height := Height.inc (max e1.height e2.height)
+  let derived ← Event.newNodeWithId derivedNodeId height
+  let _ ← Reactive.Event.subscribe e1 derived.fire
+  let _ ← Reactive.Event.subscribe e2 derived.fire
+  pure derived
+
+/-- Merge two events into one, firing all values.
+    When both fire simultaneously (same frame), both values are delivered.
+    This preserves the pre-Reflex behavior. For left-bias semantics, use `merge`. -/
+def mergeAll [Timeline t] (ctx : TimelineCtx t) (e1 : Event t a) (e2 : Event t a) : IO (Event t a) := do
+  let nodeId ← ctx.freshNodeId
+  mergeAllWithId e1 e2 nodeId
 
 end Event
 

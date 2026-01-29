@@ -32,14 +32,14 @@ test "height ordering is respected" := do
   -- regardless of subscription order
   shouldBe result [1, 2, 3]
 
-test "diamond dependency fires in height order" := do
+test "diamond dependency fires with left-bias" := do
   let result ← runSpider do
     let (trigger, fire) ← newTriggerEvent (t := Spider) (a := Nat)
 
     -- Create diamond: trigger → e1, e2 → merged
     let e1 ← Event.mapM (· + 1) trigger   -- height 1
     let e2 ← Event.mapM (· + 10) trigger  -- height 1
-    let merged ← Event.mergeM e1 e2       -- height 2
+    let merged ← Event.mergeM e1 e2       -- height 2 (left-bias)
 
     -- Track all values seen by merged
     let seenRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
@@ -51,9 +51,31 @@ test "diamond dependency fires in height order" := do
 
     SpiderM.liftIO seenRef.get
 
-  -- Both e1 and e2 are height 1, so they fire before merged (height 2)
+  -- Both e1 and e2 fire simultaneously, but mergeM uses left-bias
+  -- Only e1's value (6) is delivered; e2's value (15) is suppressed
+  shouldBe result [6]
+
+test "diamond dependency with mergeAllM fires both" := do
+  let result ← runSpider do
+    let (trigger, fire) ← newTriggerEvent (t := Spider) (a := Nat)
+
+    -- Create diamond: trigger → e1, e2 → merged
+    let e1 ← Event.mapM (· + 1) trigger   -- height 1
+    let e2 ← Event.mapM (· + 10) trigger  -- height 1
+    let merged ← Event.mergeAllM e1 e2    -- height 2 (all-fire)
+
+    -- Track all values seen by merged
+    let seenRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
+    let _ ← merged.subscribe fun n =>
+      seenRef.modify (· ++ [n])
+
+    -- Fire trigger with value 5
+    fire 5
+
+    SpiderM.liftIO seenRef.get
+
+  -- Both e1 and e2 fire simultaneously, mergeAllM delivers both
   -- Within same height, ordered by nodeId (e1 created before e2)
-  -- So we see: e1's value (6), then e2's value (15)
   shouldBe result [6, 15]
 
 test "multiple triggers in sequence create separate frames" := do
@@ -114,12 +136,12 @@ test "complex graph maintains height ordering" := do
 
     let a_ab ← Event.mapM (fun (s, _) => s!"ab-{s}") a
     let b_ab ← Event.mapM (fun (s, _) => s!"ab-{s}") b
-    let ab ← Event.mergeM a_ab b_ab
+    let ab ← Event.mergeAllM a_ab b_ab  -- use mergeAllM to see all values
     let b_bc ← Event.mapM (fun (s, _) => s!"bc-{s}") b
     let c_bc ← Event.mapM (fun (s, _) => s!"bc-{s}") c
-    let bc ← Event.mergeM b_bc c_bc
+    let bc ← Event.mergeAllM b_bc c_bc  -- use mergeAllM to see all values
 
-    let abc ← Event.mergeM ab bc
+    let abc ← Event.mergeAllM ab bc     -- use mergeAllM to see all values
 
     let orderRef ← SpiderM.liftIO <| IO.mkRef ([] : List String)
     let _ ← abc.subscribe fun s =>
@@ -129,7 +151,7 @@ test "complex graph maintains height ordering" := do
     SpiderM.liftIO orderRef.get
 
   -- All height-1 events (a, b, c) fire first
-  -- Then height-2 (ab, bc)
+  -- Then height-2 (ab, bc) - using mergeAllM, both paths propagate
   -- Then height-3 (abc) receives from ab and bc
   -- The exact order within same height depends on nodeId
   ensure (result.length == 4) s!"Expected 4 values, got {result.length}: {result}"

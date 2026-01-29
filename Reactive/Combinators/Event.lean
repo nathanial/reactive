@@ -158,8 +158,51 @@ def mergeList [Timeline t] (ctx : TimelineCtx t) (events : List (Event t a)) : I
   mergeListWithId events nodeId
 
 /-- Take the leftmost event that fires (with explicit NodeId).
-    When multiple fire simultaneously, takes the first in the list. -/
+    When multiple fire simultaneously in the same frame, only the first one fires
+    (Reflex-style first-only semantics). For all-fire behavior, use `mergeAllListWithId`. -/
 def leftmostWithId [Timeline t] (events : List (Event t a)) (nodeId : NodeId) : IO (Event t a) := do
+  let maxHeight := events.foldl (fun h e => max h e.height) ⟨0⟩
+  let derived ← Event.newNodeWithId nodeId (maxHeight.inc)
+
+  -- Track whether we've already fired in this frame (for first-only)
+  let firedThisFrameRef ← IO.mkRef false
+  let resetScheduledRef ← IO.mkRef false
+
+  let tryFire (value : a) : IO Unit := do
+    let alreadyFired ← firedThisFrameRef.get
+    if !alreadyFired then
+      firedThisFrameRef.set true
+      -- Schedule reset at derived height for next frame
+      let needsReset ← resetScheduledRef.get
+      if !needsReset then
+        resetScheduledRef.set true
+        let resetAction : IO Unit := do
+          resetScheduledRef.set false
+          firedThisFrameRef.set false
+        match ← getPropagationContext with
+        | some queue =>
+          if ← queue.isInFrame then
+            queue.insert ⟨derived.height, nodeId, resetAction⟩
+          else resetAction
+        | none => resetAction
+      derived.fire value
+
+  for e in events do
+    let _ ← Reactive.Event.subscribe e tryFire
+
+  pure derived
+
+/-- Take the leftmost event that fires.
+    When multiple fire simultaneously in the same frame, only the first one fires
+    (Reflex-style first-only semantics). For all-fire behavior, use `mergeAllList`. -/
+def leftmost [Timeline t] (ctx : TimelineCtx t) (events : List (Event t a)) : IO (Event t a) := do
+  let nodeId ← ctx.freshNodeId
+  leftmostWithId events nodeId
+
+/-- Merge all events from a list into one (with explicit NodeId).
+    All events fire if simultaneous (pre-Reflex behavior).
+    For first-only semantics, use `leftmostWithId`. -/
+def mergeAllListWithId [Timeline t] (events : List (Event t a)) (nodeId : NodeId) : IO (Event t a) := do
   let maxHeight := events.foldl (fun h e => max h e.height) ⟨0⟩
   let derived ← Event.newNodeWithId nodeId (maxHeight.inc)
 
@@ -168,12 +211,12 @@ def leftmostWithId [Timeline t] (events : List (Event t a)) (nodeId : NodeId) : 
 
   pure derived
 
-/-- Take the leftmost event that fires.
-    When multiple fire simultaneously, takes the first in the list.
-    Requires TimelineCtx for type-safe timeline separation. -/
-def leftmost [Timeline t] (ctx : TimelineCtx t) (events : List (Event t a)) : IO (Event t a) := do
+/-- Merge all events from a list into one.
+    All events fire if simultaneous (pre-Reflex behavior).
+    For first-only semantics, use `leftmost`. -/
+def mergeAllList [Timeline t] (ctx : TimelineCtx t) (events : List (Event t a)) : IO (Event t a) := do
   let nodeId ← ctx.freshNodeId
-  leftmostWithId events nodeId
+  mergeAllListWithId events nodeId
 
 /-- Fan out an Event of HashMaps into per-key Events.
     Creates a single subscription to the source event and dispatches only
