@@ -380,6 +380,52 @@ def trace' (d : Dynamic Spider a) (label : String) [ToString a] : SpiderM (Dynam
 def traceWith' (d : Dynamic Spider a) (label : String) (f : a → String) : SpiderM (Dynamic Spider a) :=
   traceWithM label f d
 
+/-! ### Memoization Combinators -/
+
+/-- Memoize a mapped computation over a Dynamic.
+    Caches the result of `f` and only recomputes when the input value changes.
+    Uses BEq on the input type to detect when recomputation is needed.
+
+    This is useful when `f` is expensive and you want to avoid redundant
+    recomputation when the Dynamic's value hasn't changed.
+
+    Unlike `mapUniqM` which deduplicates by output, this deduplicates by input,
+    avoiding the computation entirely when the input is unchanged.
+
+    Example:
+    ```
+    -- Expensive parsing only when text changes
+    let parsedDyn ← Dynamic.memoizeM parseDocument textDyn
+    ``` -/
+def memoizeM [BEq a] (f : a → b) (da : Dynamic Spider a) : SpiderM (Dynamic Spider b) := ⟨fun env => do
+  let _ ← env.incrementDepth "Dynamic.memoizeM"
+  let initial ← da.sample
+  let initialResult := f initial
+
+  -- Cache both input and output
+  let cachedInputRef ← IO.mkRef initial
+  let valueRef ← IO.mkRef initialResult
+  let (changeEvent, trigger) ← Event.newTrigger env.timelineCtx
+
+  let unsub ← Reactive.Event.subscribe da.updated fun newInput => do
+    let cachedInput ← cachedInputRef.get
+    if newInput != cachedInput then
+      -- Input changed, recompute
+      let newResult := f newInput
+      cachedInputRef.set newInput
+      valueRef.set newResult
+      trigger newResult
+    -- else: input unchanged, skip computation and don't fire
+
+  env.currentScope.register unsub
+  env.decrementDepth
+  pure ⟨valueRef, changeEvent, trigger⟩⟩
+
+/-- Memoize a computation (fluent style).
+    Enables: `dynamic.memoize' expensiveComputation` -/
+def memoize' [BEq a] (da : Dynamic Spider a) (f : a → b) : SpiderM (Dynamic Spider b) :=
+  memoizeM f da
+
 /-! ### Collection Combinators -/
 
 /-- Convert a List of Dynamics into a Dynamic of List.

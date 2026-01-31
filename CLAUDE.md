@@ -147,7 +147,8 @@ All have `'` suffix: `map'`, `filter'`, `mapMaybe'`, `merge'`, `mergeAll'`, `tag
 | Combinator | Description |
 |------------|-------------|
 | `Dynamic.mapM f d` | Map (no deduplication) |
-| `Dynamic.mapUniqM f d` | Map with BEq deduplication |
+| `Dynamic.mapUniqM f d` | Map with BEq deduplication on output |
+| `Dynamic.memoizeM f d` | Map with BEq deduplication on input (skips computation when input unchanged) |
 | `Dynamic.zipWithM f d1 d2` | Combine two dynamics |
 | `Dynamic.zipWith3M f d1 d2 d3` | Combine three dynamics |
 | `Dynamic.pureM x` | Constant dynamic |
@@ -159,7 +160,7 @@ All have `'` suffix: `map'`, `filter'`, `mapMaybe'`, `merge'`, `mergeAll'`, `tag
 | `Dynamic.switchOptionM dd default` | Flatten `Dyn (Option (Dyn a))` with default |
 
 #### Fluent Variants
-`map'`, `mapUniq'`, `zipWith'`, `zip'`, `zipWith3'`, `ap'`, `switch'`, `bindOption'`, `switchOption'`
+`map'`, `mapUniq'`, `memoize'`, `zipWith'`, `zip'`, `zipWith3'`, `ap'`, `switch'`, `bindOption'`, `switchOption'`
 
 ---
 

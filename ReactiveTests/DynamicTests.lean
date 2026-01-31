@@ -500,5 +500,122 @@ test "Dynamic.bindOption' fluent style works correctly" := do
     pure (v0, v1)
   shouldBe result (999, 105)
 
+-- Tests for Dynamic.memoizeM
+
+test "Dynamic.memoizeM skips computation when input unchanged" := do
+  let result ← runSpider do
+    let (event, trigger) ← newTriggerEvent (t := Spider) (a := Nat)
+    let source ← holdDyn 10 event
+
+    -- Create a memoized dynamic with pure function
+    let memoized ← Dynamic.memoizeM (· * 2) source
+
+    -- Initial value
+    let v0 ← memoized.sample
+
+    -- Fire same value - computation should be skipped, no event fires
+    trigger 10
+    let v1 ← memoized.sample
+
+    -- Fire different value - computation should run
+    trigger 20
+    let v2 ← memoized.sample
+
+    -- Fire same value again - computation should be skipped
+    trigger 20
+    let v3 ← memoized.sample
+
+    pure (v0, v1, v2, v3)
+
+  -- Values should be correct
+  shouldBe result (20, 20, 40, 40)
+
+test "Dynamic.memoizeM fires event only when input changes" := do
+  let result ← runSpider do
+    let (event, trigger) ← newTriggerEvent (t := Spider) (a := Nat)
+    let source ← holdDyn 5 event
+    let memoized ← Dynamic.memoizeM (· * 3) source
+
+    let eventsRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
+    let _ ← memoized.updated.subscribe fun n =>
+      eventsRef.modify (· ++ [n])
+
+    trigger 5   -- same as initial, should NOT fire
+    trigger 10  -- different, should fire
+    trigger 10  -- same as previous, should NOT fire
+    trigger 15  -- different, should fire
+    trigger 5   -- different (back to original), should fire
+
+    SpiderM.liftIO eventsRef.get
+
+  -- Only 3 events: 10*3=30, 15*3=45, 5*3=15
+  shouldBe result [30, 45, 15]
+
+test "Dynamic.memoize' fluent style works correctly" := do
+  let result ← runSpider do
+    let (event, trigger) ← newTriggerEvent (t := Spider) (a := String)
+    let source ← holdDyn "hello" event
+
+    -- Use fluent syntax via explicit namespace
+    let memoized ← Dynamic.memoize' source (·.length)
+
+    let v0 ← memoized.sample
+    trigger "hello"  -- same, skip
+    trigger "world"  -- different string (same length but different input!)
+    let v1 ← memoized.sample
+    trigger "hi"     -- different
+    let v2 ← memoized.sample
+
+    pure (v0, v1, v2)
+
+  -- Values should be string lengths
+  -- "hello" -> 5, "world" -> 5, "hi" -> 2
+  shouldBe result (5, 5, 2)
+
+test "Dynamic.memoizeM vs mapUniqM: input-based vs output-based dedup" := do
+  -- This test demonstrates the difference between memoizeM (input-based)
+  -- and mapUniqM (output-based) deduplication
+
+  let result ← runSpider do
+    let (event, trigger) ← newTriggerEvent (t := Spider) (a := Nat)
+    let source ← holdDyn 1 event
+
+    -- memoizeM: skips computation AND event if INPUT unchanged
+    let memoized ← Dynamic.memoizeM (· % 3) source
+    -- Maps: 1->1, 4->1, 7->1, 2->2, etc.
+
+    -- mapUniqM: always computes, but skips event if OUTPUT unchanged
+    let mapUniq ← Dynamic.mapUniqM (· % 3) source
+
+    let memoEventsRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
+    let mapUniqEventsRef ← SpiderM.liftIO <| IO.mkRef ([] : List Nat)
+
+    let _ ← memoized.updated.subscribe fun n =>
+      memoEventsRef.modify (· ++ [n])
+    let _ ← mapUniq.updated.subscribe fun n =>
+      mapUniqEventsRef.modify (· ++ [n])
+
+    -- Fire sequence: 1 -> 4 -> 4 -> 7
+    -- 1 % 3 = 1 (initial)
+    -- 4 % 3 = 1 (same output, different input)
+    -- 4 (same input)
+    -- 7 % 3 = 1 (same output, different input)
+
+    trigger 4
+    trigger 4
+    trigger 7
+
+    let memoEvents ← SpiderM.liftIO memoEventsRef.get
+    let mapUniqEvents ← SpiderM.liftIO mapUniqEventsRef.get
+
+    pure (memoEvents, mapUniqEvents)
+
+  -- memoizeM fires for each new INPUT: 4 and 7 (1 is initial, skips duplicate 4)
+  -- Output is always 1, so events are [1, 1]
+  shouldBe result.1 [1, 1]
+
+  -- mapUniqM fires only when OUTPUT changes: none (all outputs are 1)
+  shouldBe result.2 []
+
 
 end ReactiveTests.DynamicTests
