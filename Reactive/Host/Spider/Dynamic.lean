@@ -480,6 +480,13 @@ def sequenceArrayM (dynamics : Array (Dynamic Spider a)) : SpiderM (Dynamic Spid
   env.decrementDepth
   pure result⟩
 
+/-- Traverse a List with a Dynamic-producing function, collecting the results
+    into a Dynamic of List.
+
+    Equivalent to `Dynamic.sequenceM (values.map f)`. -/
+def traverseM (f : a → Dynamic Spider b) (values : List a) : SpiderM (Dynamic Spider (List b)) :=
+  sequenceM (values.map f)
+
 end Dynamic
 
 end Reactive.Host

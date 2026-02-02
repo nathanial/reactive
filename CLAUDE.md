@@ -158,6 +158,7 @@ All have `'` suffix: `map'`, `filter'`, `mapMaybe'`, `merge'`, `mergeAll'`, `tag
 | `Dynamic.switchM dd` | Flatten `Dyn (Dyn a)` → `Dyn a` |
 | `Dynamic.bindOptionM d f default` | Bind/flatMap for `Dyn (Option a)` |
 | `Dynamic.switchOptionM dd default` | Flatten `Dyn (Option (Dyn a))` with default |
+| `Dynamic.traverseM f xs` | Map over list, collecting into `Dyn (List b)` |
 
 #### Fluent Variants
 `map'`, `mapUniq'`, `memoize'`, `zipWith'`, `zip'`, `zipWith3'`, `ap'`, `switch'`, `bindOption'`, `switchOption'`
